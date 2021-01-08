@@ -5,7 +5,7 @@
 #include <cassert>
 #include <sys/time.h>
 
-// #include <MiniFB.h>
+#include <MiniFB.h>
 
 constexpr bool debug = false;
 
@@ -390,17 +390,27 @@ struct Memory
 
 struct Interface
 {
-    std::array<std::array<int, 64>, 32> display;
+    std::array<std::array<int, 64>, 32> display = {0};
+    bool displayChanged = false;
 
-#if 0
-    constexpr int windowScaleFactor = 4;
+    bool succeeded = false;
+
+    static constexpr int windowInitialScaleFactor = 16;
     mfb_window *window;
-    int windowWidth = 64 * windowScaleFactor;
-    int windowHeight = 32 * windowScaleFactor;
+    int windowWidth = 64 * windowInitialScaleFactor;
+    int windowHeight = 32 * windowInitialScaleFactor;
     uint32_t* windowBuffer;
 
     void redraw()
     {
+        for(int row = 0; row < windowHeight; row++) {
+            for(int col = 0; col < windowWidth; col++) {
+                int displayX = col * 64 / windowWidth;
+                int displayY = row * 32 / windowHeight;
+                windowBuffer[col + row * windowWidth] = display.at(displayY).at(displayX) ? MFB_RGB(255, 255, 255) : MFB_RGB(0, 0, 0); 
+            }
+        }
+        mfb_update_ex(window, windowBuffer, windowWidth, windowHeight);
     }
 
     void resize(int width, int height)
@@ -408,27 +418,36 @@ struct Interface
         windowWidth = width;
         windowHeight = height;
         delete[] windowBuffer;
-        windowBuffer = new uint32_t[64 * windowScaleFactor * 32 * windowScaleFactor];
+        windowBuffer = new uint32_t[windowWidth * windowHeight];
         redraw();
     }
 
     static void resize(mfb_window *window, int width, int height)
     {
-        Interface *ifc = static_case<Interface *>(mfb_get_user_data(window));
+        Interface *ifc = static_cast<Interface *>(mfb_get_user_data(window));
         ifc->resize(width, height);
         // Optionally you can also change the viewport size
         // mfb_set_viewport(window, 0, 0, width, height);
     }
 
+    void iterate()
+    {
+        if(displayChanged) {
+            redraw();
+            displayChanged = false;
+        }
+        // mfb_wait_sync(window);
+    }
+
     Interface()
     {
-        window = mfb_open_ex("Noise Test", 64 * windowScaleFactor, 32 * windowScaleFactor, WF_RESIZABLE);
-        windowBuffer = new uint32_t[64 * windowScaleFactor * 32 * windowScaleFactor];
-        if (!window)
-            return 0;
-        mfb_set_user_data(window, (void *) this);
+        window = mfb_open_ex("Noise Test", windowWidth, windowHeight, WF_RESIZABLE);
+        if (window) {
+            windowBuffer = new uint32_t[windowWidth * windowHeight];
+            mfb_set_user_data(window, (void *) this);
+            succeeded = true;
+        }
     }
-#endif
 
     void startSound()
     {
@@ -453,21 +472,8 @@ struct Interface
     {
         bool collision = display.at(y).at(x) ^ value;
         display.at(y).at(x) ^= value;
+        displayChanged = true /* collision */;
         return collision;
-    }
-
-    void output()
-    {
-        puts("\033[H.--------------------------------------------------------------------------------------------------------------------------------.");
-        for(int row = 0; row < 32; row++) {
-            printf("|");
-            for(int column = 0; column < 64; column++) {
-                printf("%s", display.at(row).at(column) ? "█" : " ");
-                printf("%s", display.at(row).at(column) ? "█" : " ");
-            }
-            puts("|");
-        }
-        puts("`--------------------------------------------------------------------------------------------------------------------------------'");
     }
 
     void clear()
@@ -611,8 +617,6 @@ int main(int argc, char **argv)
 
     int instructionsPerSecond = 1000;
 
-    printf("\033[2J");
-
     chip8.pc = 0x200;
     while(1) {
         struct timeval instructionThen, instructionNow;
@@ -627,9 +631,7 @@ int main(int argc, char **argv)
         gettimeofday(&interfaceNow, nullptr);
         dt = interfaceNow.tv_sec + interfaceNow.tv_usec / 1000000.0 - (interfaceThen.tv_sec + interfaceThen.tv_usec / 1000000.0);
         if(dt > .0166f) {
-            interface.output();
-            puts("");
-            puts("");
+            interface.iterate();
             chip8.tick(interface);
             interfaceThen = interfaceNow;
         }
