@@ -1,0 +1,9 @@
+MINIFB_INCDIR   =       .
+MINIFB_LIBDIR   =       .
+
+CXXFLAGS        +=      -I$(MINIFB_INCDIR)
+
+LDFLAGS         +=      -L$(MINIFB_LIBDIR) -lminifb -lGL -lX11
+
+xochip: xochip.o
+	g++ $(CXXFLAGS) $< -o $@ $(LDFLAGS)
