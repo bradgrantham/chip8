@@ -7,7 +7,7 @@
 
 #include <MiniFB.h>
 
-constexpr bool debug = false;
+constexpr bool debug = true;
 
 template <class MEMORY, class INTERFACE>
 struct Chip8Interpreter
@@ -18,6 +18,16 @@ struct Chip8Interpreter
     uint16_t pc = 0;
     uint16_t DT = 0;
     uint16_t ST = 0;
+
+    bool waitingForKeyPress = false;
+    bool waitingForKeyRelease = false;
+    uint8_t keyPressed;
+    uint8_t keyDestinationRegister;
+
+    Chip8Interpreter(uint16_t initialPC) :
+        pc(initialPC)
+    {
+    }
 
     void tick(INTERFACE& interface)
     {
@@ -99,34 +109,71 @@ struct Chip8Interpreter
         uint16_t xArgument = (instructionWord & 0x0F00) >> 8;
         uint16_t yArgument = (instructionWord & 0x00F0) >> 4;
 
+        if(waitingForKeyPress) {
+
+            bool isPressed = false;
+            uint8_t whichKey;
+
+            for(uint8_t i = 0; i < 16; i++) {
+                if(interface.pressed(i)) {
+                    isPressed = true;
+                    whichKey = i;
+                }
+            }
+
+            if(isPressed) {
+                printf("pressed %d now wait for release\n", whichKey);
+                keyPressed = whichKey;
+                waitingForKeyPress = false;
+                waitingForKeyRelease = true;
+            } else {
+                return;
+            }
+        }
+
+        if(waitingForKeyRelease) {
+            bool wasReleased = !interface.pressed(keyPressed);
+
+            if(wasReleased) {
+                printf("key wait over\n");
+                waitingForKeyRelease = false;
+                registers[keyDestinationRegister] = keyPressed;
+            } else {
+                return;
+            }
+        }
+
         int highNybble = instructionWord >> 12;
 
         if(debug) {
-            printf("CHIP8: I:%04X pc:%04X DT:%02X ST:%02X\n", I, pc, DT, ST);
-            for(int i = 0; i < 2; i++) {
-                printf("    ");
-                for(int j = 0; j < 8; j++) {
-                    printf("V%X:%02X ", i * 8 + j, registers[i * 8 + j]);
-                }
-                puts("");
+            printf("CHIP8: pc:%04X I:%04X DT:%02X ST:%02X ", pc, I, DT, ST);
+            for(int i = 0; i < 16; i++) {
+                printf("%02X ", registers[i]);
             }
+            puts("");
         }
 
         switch(highNybble) {
             case INSN_SYS: {
                 uint16_t sysOpcode = instructionWord & 0xFFF;
-                if(debug)printf("%04X: (%04X) SYS%x\n", pc, instructionWord, sysOpcode);
                 switch(sysOpcode) {
                     case SYS_CLS: { // 00E0 - CLS - Clear the display.
+                        if(debug)printf("%04X: (%04X) CLS\n", pc, instructionWord);
                         interface.clear();
                         break;
                     }
                     case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
+                        if(debug)printf("%04X: (%04X) RET\n", pc, instructionWord);
                         pc = stack.back();
                         stack.pop_back();
                         break;
                     }
+                    default : {
+                        fprintf(stderr, "%04X: unsupported 0NNN instruction %04X ignored\n", pc, instructionWord);
+                        break;
+                    }
                 }
+                pc += 2;
                 break;
             }
             case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
@@ -136,12 +183,12 @@ struct Chip8Interpreter
             }
             case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
                 if(debug)printf("%04X: (%04X) CALL %X\n", pc, instructionWord, imm12Argument);
-                stack.push_back(pc + 2);
+                stack.push_back(pc);
                 pc = imm12Argument;
                 break;
             }
             case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
-                if(debug)printf("%04X: (%04X) SE V%X %X\n", pc, instructionWord, xArgument, imm12Argument);
+                if(debug)printf("%04X: (%04X) SE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
                 if(registers[xArgument] == imm8Argument) {
                     pc += 4;
                 } else {
@@ -150,7 +197,7 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
-                if(debug)printf("%04X: (%04X) SNE V%X %X\n", pc, instructionWord, xArgument, imm12Argument);
+                if(debug)printf("%04X: (%04X) SNE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
                 if(registers[xArgument] != imm8Argument) {
                     pc += 4;
                 } else {
@@ -159,6 +206,10 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_SE_REG: { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
+                if(imm4Argument != 0) {
+                    fprintf(stderr, "%04X: unsupported instruction %04X\n", pc, instructionWord);
+                    abort();
+                }
                 if(debug)printf("%04X: (%04X) SE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
                 if(registers[xArgument] == registers[yArgument]) {
                     pc += 4;
@@ -181,48 +232,61 @@ struct Chip8Interpreter
             }
             case INSN_ALU: {
                 int opcode = instructionWord & 0x000F;
-                if(debug)printf("%04X: (%04X) ALU V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                 switch(opcode) {
                     case ALU_LD: { // 8xy0 - LD Vx, Vy - Set Vx = Vy.  Stores the value of register Vy in register Vx.  
+                        if(debug)printf("%04X: (%04X) LD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] = registers[yArgument];
                         break;
                     }
                     case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
+                        if(debug)printf("%04X: (%04X) OR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] |= registers[yArgument];
                         break;
                     }
                     case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
+                        if(debug)printf("%04X: (%04X) AND V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] &= registers[yArgument];
                         break;
                     }
                     case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
+                        if(debug)printf("%04X: (%04X) XOR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] ^= registers[yArgument];
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
+                        if(debug)printf("%04X: (%04X) ADD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         uint16_t result16 = registers[xArgument] + registers[yArgument];
                         registers[0xF] = (result16 > 255) ? 1 : 0;
                         registers[xArgument] = registers[xArgument] + registers[yArgument];
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        registers[0xF] = (registers[xArgument] > registers[yArgument]) ? 1 : 0;
+                        if(debug)printf("%04X: (%04X) SUB V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                        registers[0xF] = (registers[xArgument] >= registers[yArgument]) ? 1 : 0;
                         registers[xArgument] = registers[xArgument] - registers[yArgument];
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        registers[0xF] = (registers[yArgument] > registers[xArgument]) ? 1 : 0;
+                        if(debug)printf("%04X: (%04X) SUBN V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                        registers[0xF] = (registers[yArgument] >= registers[xArgument]) ? 1 : 0;
                         registers[xArgument] = registers[yArgument] - registers[xArgument];
                         break;
                     }
-                    case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vx SHR 1.  If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2.
-                        registers[0xF] = (registers[xArgument] & 0x01) ? 1 : 0;
-                        registers[xArgument] = registers[xArgument] / 2;
+                    case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
+                        if(debug)printf("%04X: (%04X) SHR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                        registers[0xF] = registers[yArgument] & 0x1;
+                        registers[xArgument] = registers[yArgument] / 2;
                         break;
                     }
-                    case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2.  
-                        registers[0xF] = (registers[xArgument] & 0x80) ? 1 : 0;
-                        registers[xArgument] = registers[xArgument] * 2;
+                    case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
+                        if(debug)printf("%04X: (%04X) SHL V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                        registers[0xF] = (registers[yArgument] >> 7) & 0x1;
+                        registers[xArgument] = registers[yArgument] * 2;
+                        break;
+                    }
+                    default : {
+                        fprintf(stderr, "%04X: unsupported 8xyN instruction %04X\n", pc, instructionWord);
+                        abort();
                         break;
                     }
                 }
@@ -231,6 +295,10 @@ struct Chip8Interpreter
             }
             case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
                 if(debug)printf("%04X: (%04X) SNE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
+                if(imm4Argument != 0) {
+                    fprintf(stderr, "%04X: unsupported 9XY0 instruction %04X\n", pc, instructionWord);
+                    abort();
+                }
                 if(registers[xArgument] != registers[yArgument]) {
                     pc += 4;
                 } else {
@@ -264,15 +332,15 @@ struct Chip8Interpreter
                 // is outside the coordinates of the display, it wraps around to the opposite side of
                 // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
                 // Display, for more information on the Chip-8 screen and sprites.
-                bool collision = 0;
+                bool erased = 0;
                 if(debug)printf("%04X: (%04X) DRW V%X, V%X, %X\n", pc, instructionWord, xArgument, yArgument, imm4Argument);
                 for(int rowIndex = 0; rowIndex < imm4Argument; rowIndex++) {
                     uint8_t byte = memory.read(I + rowIndex);
                     for(int bitIndex = 0; bitIndex < 8; bitIndex++) {
-                        collision |= interface.draw(registers[xArgument] + bitIndex, registers[yArgument] + rowIndex, (byte >> (7U - bitIndex)) & 0x1U);
+                        erased |= interface.draw(registers[xArgument] + bitIndex, registers[yArgument] + rowIndex, (byte >> (7U - bitIndex)) & 0x1U);
                     }
                 }
-                registers[0xF] = collision ? 1 : 0;
+                registers[0xF] = erased ? 1 : 0;
                 pc += 2;
                 break;
             }
@@ -281,16 +349,25 @@ struct Chip8Interpreter
                 switch(opcode) {
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
                         if(debug)printf("%04X: (%04X) SKP V%X\n", pc, instructionWord, xArgument);
+                        printf("key %0X\n", xArgument);
                         if(interface.pressed(xArgument)) {
+                            printf("pressed\n");
                             pc += 2;
                         }
                         break;
                     }
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
                         if(debug)printf("%04X: (%04X) SKNP V%X\n", pc, instructionWord, xArgument);
+                        printf("key %0X\n", xArgument);
                         if(!interface.pressed(xArgument)) {
+                            printf("not pressed\n");
                             pc += 2;
                         }
+                        break;
+                    }
+                    default : {
+                        fprintf(stderr, "%04X: unsupported ExNN instruction %04X\n", pc, instructionWord);
+                        abort();
                         break;
                     }
                 }
@@ -307,7 +384,9 @@ struct Chip8Interpreter
                     }
                     case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
                         if(debug)printf("%04X: (%04X) LD V%X, K\n", pc, instructionWord, xArgument);
-                        registers[xArgument] = interface.waitKey();
+                        printf("waiting for key\n");
+                        waitingForKeyPress = true;
+                        keyDestinationRegister = xArgument;
                         break;
                     }
                     case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
@@ -346,13 +425,20 @@ struct Chip8Interpreter
                         for(int i = 0; i <= xArgument; i++) {
                             memory.write(I + i, registers[i]);
                         }
+                        I = I + xArgument + 1;
                         break;
                     }
                     case SPECIAL_LD_VXI: { // Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.  The interpreter reads values from memory starting at location I into registers V0 through Vx.
-                        if(debug)printf("%04X: (%04X) LD V%X, [I]\n", pc, xArgument, instructionWord);
+                        if(debug)printf("%04X: (%04X) LD V%X, [I]\n", pc, instructionWord, xArgument);
                         for(int i = 0; i <= xArgument; i++) {
                             registers[i] = memory.read(I + i);
                         }
+                        I = I + xArgument + 1;
+                        break;
+                    }
+                    default : {
+                        fprintf(stderr, "unsupported FxNN instruction %04X\n", instructionWord);
+                        abort();
                         break;
                     }
                 }
@@ -392,6 +478,8 @@ struct Interface
 {
     std::array<std::array<int, 64>, 32> display = {0};
     bool displayChanged = false;
+    bool closed = false;
+    std::array<bool, 16> keyPressed = {0};
 
     bool succeeded = false;
 
@@ -401,7 +489,7 @@ struct Interface
     int windowHeight = 32 * windowInitialScaleFactor;
     uint32_t* windowBuffer;
 
-    void redraw()
+    bool redraw()
     {
         for(int row = 0; row < windowHeight; row++) {
             for(int col = 0; col < windowWidth; col++) {
@@ -410,7 +498,9 @@ struct Interface
                 windowBuffer[col + row * windowWidth] = display.at(displayY).at(displayX) ? MFB_RGB(255, 255, 255) : MFB_RGB(0, 0, 0); 
             }
         }
-        mfb_update_ex(window, windowBuffer, windowWidth, windowHeight);
+        int status = mfb_update_ex(window, windowBuffer, windowWidth, windowHeight);
+        closed = (status < 0);
+        return status >= 0;
     }
 
     void resize(int width, int height)
@@ -419,10 +509,9 @@ struct Interface
         windowHeight = height;
         delete[] windowBuffer;
         windowBuffer = new uint32_t[windowWidth * windowHeight];
-        redraw();
     }
 
-    static void resize(mfb_window *window, int width, int height)
+    static void resizecb(mfb_window *window, int width, int height)
     {
         Interface *ifc = static_cast<Interface *>(mfb_get_user_data(window));
         ifc->resize(width, height);
@@ -430,21 +519,62 @@ struct Interface
         // mfb_set_viewport(window, 0, 0, width, height);
     }
 
-    void iterate()
+    void keyboard(mfb_key key, mfb_key_mod mod, bool isPressed)
     {
+        switch(key) {
+            case KB_KEY_ESCAPE:
+                if(isPressed) {
+                    mfb_close(window);
+                    closed = true;
+                }
+                break;
+            case KB_KEY_1: keyPressed[0x1] = isPressed; break;
+            case KB_KEY_2: keyPressed[0x2] = isPressed; break;
+            case KB_KEY_3: keyPressed[0x3] = isPressed; break;
+            case KB_KEY_4: keyPressed[0xC] = isPressed; break;
+            case KB_KEY_Q: keyPressed[0x4] = isPressed; break;
+            case KB_KEY_W: keyPressed[0x5] = isPressed; break;
+            case KB_KEY_E: keyPressed[0x6] = isPressed; break;
+            case KB_KEY_R: keyPressed[0xD] = isPressed; break;
+            case KB_KEY_A: keyPressed[0x7] = isPressed; break;
+            case KB_KEY_S: keyPressed[0x8] = isPressed; break;
+            case KB_KEY_D: keyPressed[0x9] = isPressed; break;
+            case KB_KEY_F: keyPressed[0xE] = isPressed; break;
+            case KB_KEY_Z: keyPressed[0xA] = isPressed; break;
+            case KB_KEY_X: keyPressed[0x0] = isPressed; break;
+            case KB_KEY_C: keyPressed[0xB] = isPressed; break;
+            case KB_KEY_V: keyPressed[0xF] = isPressed; break;
+            default: /* pass */ break;
+        }
+    }
+
+    static void keyboardcb(mfb_window *window, mfb_key key, mfb_key_mod mod, bool isPressed)
+    {
+        Interface *ifc = static_cast<Interface *>(mfb_get_user_data(window));
+        ifc->keyboard(key, mod, isPressed);
+    }
+
+    bool iterate()
+    {
+        bool success = true;
         if(displayChanged) {
-            redraw();
+            success = redraw();
             displayChanged = false;
+        } else {
+            success = (mfb_update_events(window) >= 0);
         }
         // mfb_wait_sync(window);
+        return success && !closed;
     }
 
     Interface()
     {
-        window = mfb_open_ex("Noise Test", windowWidth, windowHeight, WF_RESIZABLE);
+        window = mfb_open_ex("CHIP8", windowWidth, windowHeight, WF_RESIZABLE);
         if (window) {
             windowBuffer = new uint32_t[windowWidth * windowHeight];
             mfb_set_user_data(window, (void *) this);
+            mfb_set_resize_callback(window, resizecb);
+            mfb_set_keyboard_callback(window, keyboardcb);
             succeeded = true;
         }
     }
@@ -458,22 +588,19 @@ struct Interface
     {
     }
 
-    uint8_t waitKey()
-    {
-        for(;;){}
-    }
-
     bool pressed(uint8_t key)
     {
-        return false;
+        return keyPressed[key];
     }
 
     bool draw(uint8_t x, uint8_t y, int value)
     {
-        bool collision = display.at(y).at(x) ^ value;
+        x = x % 64;
+        y = y % 32;
+        displayChanged |= (display.at(y).at(x) != value);
+        bool erased = (display.at(y).at(x) ^ value) == 0;
         display.at(y).at(x) ^= value;
-        displayChanged = true /* collision */;
-        return collision;
+        return erased;
     }
 
     void clear()
@@ -604,25 +731,24 @@ int main(int argc, char **argv)
     for(size_t i = 0; i < digitSprites.size(); i++) {
         memory.write(0x200 - 80 + i, digitSprites[i]);
         if(i % 5 == 0) {
-            memory.digitAddresses[i / 5] = i;
+            memory.digitAddresses[i / 5] = 0x200 - 80 + i;
         }
     }
 
-    Chip8Interpreter<Memory,Interface> chip8;
+    Chip8Interpreter<Memory,Interface> chip8(0x200);
 
-    interface.clear();
-    
     struct timeval interfaceThen, interfaceNow;
     gettimeofday(&interfaceThen, nullptr);
 
     int instructionsPerSecond = 1000;
 
-    chip8.pc = 0x200;
-    while(1) {
+    bool done = false;
+    while(!done) {
+        float dt = 0.0;
+
         struct timeval instructionThen, instructionNow;
         gettimeofday(&instructionThen, nullptr);
         chip8.step(memory, interface);
-        float dt = 0.0;
         do {
             gettimeofday(&instructionNow, nullptr);
             dt = instructionNow.tv_sec + instructionNow.tv_usec / 1000000.0 - (instructionThen.tv_sec + instructionThen.tv_usec / 1000000.0);
@@ -631,7 +757,7 @@ int main(int argc, char **argv)
         gettimeofday(&interfaceNow, nullptr);
         dt = interfaceNow.tv_sec + interfaceNow.tv_usec / 1000000.0 - (interfaceThen.tv_sec + interfaceThen.tv_usec / 1000000.0);
         if(dt > .0166f) {
-            interface.iterate();
+            done = !interface.iterate();
             chip8.tick(interface);
             interfaceThen = interfaceNow;
         }
