@@ -8,15 +8,6 @@
 
 #if 0
 
-Make display be 128x64, move wrapping out of interface into interpreter
-    128 * 64 * 8bits
-    color 0 white by default
-    color 1 black by default
-    make interface display be 8 bits
-    add plane mask to interface::draw
-        internally cycle through masks
-    add color table to interface
-        default is black, white, dark gray?, light gray?
 
 CLI args to set interface colors --color {0,1,2,3} RRGGBB (matches Octo JSON #RRGGBB, what about names?)
 CLI to set platform --platform {chip8,schip,xochip}
@@ -494,7 +485,17 @@ struct Chip8Interpreter
                 for(int rowIndex = 0; rowIndex < imm4Argument; rowIndex++) {
                     uint8_t byte = memory.read(I + rowIndex);
                     for(int bitIndex = 0; bitIndex < 8; bitIndex++) {
-                        erased |= interface.draw(registers[xArgument] + bitIndex, registers[yArgument] + rowIndex, (byte >> (7U - bitIndex)) & 0x1U);
+                        int x = registers[xArgument] + bitIndex;
+                        int y = registers[yArgument] + rowIndex;
+                        x = x % 64;
+                        y = y % 32;
+                        bool oneErased = false;
+                        for(int ygrid = 0; ygrid < 2; ygrid++) {
+                            for(int xgrid = 0; xgrid < 2; xgrid++) {
+                                oneErased = interface.draw(x * 2 + xgrid, y * 2 + ygrid, (byte >> (7U - bitIndex)) & 0x1U, 0x1);
+                            }
+                        }
+                        erased |= oneErased;
                     }
                 }
                 registers[0xF] = erased ? 1 : 0;
@@ -627,28 +628,33 @@ struct Memory
     }
 };
 
+typedef std::array<uint8_t, 3> vec3ub;
+
 struct Interface
 {
-    std::array<std::array<int, 64>, 32> display = {0};
+    std::array<std::array<uint8_t, 128>, 64> display = {0};
+    std::array<vec3ub, 256> colorTable;
     bool displayChanged = false;
     bool closed = false;
     std::array<bool, 16> keyPressed = {0};
 
     bool succeeded = false;
 
-    static constexpr int windowInitialScaleFactor = 16;
+    static constexpr int windowInitialScaleFactor = 8;
     mfb_window *window;
-    int windowWidth = 64 * windowInitialScaleFactor;
-    int windowHeight = 32 * windowInitialScaleFactor;
+    int windowWidth = 128 * windowInitialScaleFactor;
+    int windowHeight = 64 * windowInitialScaleFactor;
     uint32_t* windowBuffer;
 
     bool redraw()
     {
         for(int row = 0; row < windowHeight; row++) {
             for(int col = 0; col < windowWidth; col++) {
-                int displayX = col * 64 / windowWidth;
-                int displayY = row * 32 / windowHeight;
-                windowBuffer[col + row * windowWidth] = display.at(displayY).at(displayX) ? MFB_RGB(255, 255, 255) : MFB_RGB(0, 0, 0); 
+                int displayX = col * 128 / windowWidth;
+                int displayY = row * 64 / windowHeight;
+                uint8_t pixel = display.at(displayY).at(displayX);
+                auto &c = colorTable.at(pixel);
+                windowBuffer[col + row * windowWidth] = MFB_RGB(c[0], c[1], c[2]);
             }
         }
         int status = mfb_update_ex(window, windowBuffer, windowWidth, windowHeight);
@@ -730,6 +736,12 @@ struct Interface
             mfb_set_keyboard_callback(window, keyboardcb);
             succeeded = true;
         }
+        vec3ub black = {0,0,0};
+        std::fill(colorTable.begin(), colorTable.end(), black);
+        colorTable[0] = {0, 0, 0};
+        colorTable[1] = {255, 255, 255};
+        colorTable[2] = {170, 170, 170};
+        colorTable[3] = {85, 85, 85};
     }
 
     void startSound()
@@ -746,13 +758,21 @@ struct Interface
         return keyPressed[key];
     }
 
-    bool draw(uint8_t x, uint8_t y, int value)
+    bool draw(uint8_t x, uint8_t y, bool newValue, uint8_t planeMask)
     {
-        x = x % 64;
-        y = y % 32;
-        displayChanged |= (display.at(y).at(x) != value);
-        bool erased = (display.at(y).at(x) ^ value) == 0;
-        display.at(y).at(x) ^= value;
+        bool erased = false;
+        if((x <= 128) && (y < 64)) {
+            for(int i = 0; i < 2; i++) {
+                uint8_t bit = (0x1 << i);
+                if(planeMask & bit) {
+                    bool displayValue = (display.at(y).at(x) & bit);
+                    bool result = displayValue ^ newValue;
+                    displayChanged |= (displayValue != result);
+                    erased |= !result;
+                    display.at(y).at(x) = (display.at(y).at(x) & ~bit) | (result ? bit : 0);
+                }
+            }
+        }
         return erased;
     }
 
