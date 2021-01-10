@@ -3,11 +3,159 @@
 #include <cstdio>
 #include <cstdint>
 #include <cassert>
+#include <cstring>
 #include <sys/time.h>
+
+#if 0
+
+Make display be 128x64, move wrapping out of interface into interpreter
+    128 * 64 * 8bits
+    color 0 white by default
+    color 1 black by default
+    make interface display be 8 bits
+    add plane mask to interface::draw
+        internally cycle through masks
+    add color table to interface
+        default is black, white, dark gray?, light gray?
+
+CLI args to set interface colors --color {0,1,2,3} RRGGBB (matches Octo JSON #RRGGBB, what about names?)
+CLI to set platform --platform {chip8,schip,xochip}
+CLI to set quirks --quirk {shift,loadstore,jump,clip}
+CLI to set tick rate (which is? per second?  per field?) --ticks NN
+
+enum ChipPlatform { CHIP8, SCHIP_1_1, XOCHIP };
+ChipPlatform platform;
+static constexpr uint32_t QUIRK_SHIFT = 0x01;           /* shift VX instead of VY */
+static constexpr uint32_t QUIRK_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
+static constexpr uint32_t QUIRK_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
+static constexpr uint32_t QUIRK_CLIP = 0x08;            /* no draw or collide wrapped, VX += rows off bottom */
+uint32_t quirks;
+bool extendedScreenMode = false;
+uint32_t screenPlaneMask = 0x1;
+add mode and quirks to Chip8Interpreter constructor
+SuperChip implies certain quirks, but turn those on from command line
+    command-line flags - --mode turns on quirks, can turn on and off with args after that too
+    That way platform turns on new functionality and quirks sets incompatible behavior
+make memory be 64K
+All skip instructions
+    // The conditional skip instructions 0xEN9E (if -key then), 0xENA1 (if key then), 0x3XNN (if vx == NN then), 0x4XNN (if vx != NN then), 0x5XY0 (if vx == vy then) and 0x9XY0 (if vx != NN) will skip over this double-wide instruction, rather than skipping halfway through it.
+    if(platform == XOCHIP) {
+        uint8_t hiByte = memory.read(pc);
+        uint8_t loByte = memory.read(pc + 1);
+        uint16_t instructionWord = hiByte * 256 + loByte;
+        if(instructionWord == 0xF000) {
+            skip 4 bytes instead of 2
+        }
+    }
+5XY2
+    if(platform == XOCHIP) {
+        save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
+    } else {
+        warn undefined
+    }
+5XY3
+    if(platform == XOCHIP) {
+        load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
+    } else {
+        warn undefined
+    }
+F000 NNNN
+    if(platform == XOCHIP) {
+        i := long NNNN (0xF000, 0xNNNN) load i with a 16-bit address.
+    } else {
+        warn undefined
+    }
+FN01
+    if(platform == XOCHIP) {
+        // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
+        interface->selectPlanes(mask);
+    } else {
+        warn undefined
+    }
+F002
+    if(platform == XOCHIP) {
+        audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
+        // !!!
+    } else {
+        warn undefined
+    }
+00DN
+    if(platform == XOCHIP) {
+        // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+        interface->scroll(0, -n)
+    } else {
+        warn undefined
+    }
+BNNN
+    if(quirks & QUIRK_JUMP) {
+        pc = (imm12Argument & 0xFF) + registers[0] + (xArgument << 8);
+    }
+00CN*    Scroll display N lines down
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        interface->scroll(0, n)
+    } else {
+        warn undefined
+    }
+00FB*    Scroll display 4 pixels right
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        interface->scroll(4, 0)
+    } else {
+        warn undefined
+    }
+00FC*    Scroll display 4 pixels left
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        interface->scroll(-4, 0)
+    } else {
+        warn undefined
+    }
+00FD*    Exit CHIP interpreter
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        return EXIT from step()
+    } else {
+        warn undefined
+    }
+00FE*    Disable extended screen mode
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        note internally and draw 2x - default
+    } else {
+        warn undefined
+    }
+00FF*    Enable extended screen mode for full-screen graphics
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        note internally and draw 1x
+    } else {
+        warn undefined
+    }
+DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision. If N=0 and extended mode, show 16x16 sprite.
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        handle case of N=0 and extended mode
+    }
+    if(quirks & QUIRK_CLIP and extended mode) {
+        set VF to number of collided rows
+        dont draw wrapped, add clipped bottom rows to VF
+    }
+FX29: not used in SCHIP 1.1
+FX30*    Point I to 10-byte font sprite for digit VX (0..9)
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        like digitAddresses but separate for 10-high
+    } else {
+        warn undefined
+    }
+FX75*    Store V0..VX in RPL user flags (X <= 7)
+    ignore, warn undefined
+FX85*    Read V0..VX from RPL user flags (X <= 7)
+    ignore, warn undefined
+FX55/FX65 do not increase I
+    if(!(quirks & QUIRK_LOAD_STORE)) { add to I }
+8XY6, 8XYE shift and test VX, not VY
+    if(quirks & QUIRK_SHIFT) { use xArgument instead }
+
+#endif
+
 
 #include <MiniFB.h>
 
-constexpr bool debug = true;
+constexpr bool debug = false;
 
 template <class MEMORY, class INTERFACE>
 struct Chip8Interpreter
@@ -349,18 +497,14 @@ struct Chip8Interpreter
                 switch(opcode) {
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
                         if(debug)printf("%04X: (%04X) SKP V%X\n", pc, instructionWord, xArgument);
-                        printf("key %0X\n", xArgument);
                         if(interface.pressed(xArgument)) {
-                            printf("pressed\n");
                             pc += 2;
                         }
                         break;
                     }
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
                         if(debug)printf("%04X: (%04X) SKNP V%X\n", pc, instructionWord, xArgument);
-                        printf("key %0X\n", xArgument);
                         if(!interface.pressed(xArgument)) {
-                            printf("not pressed\n");
                             pc += 2;
                         }
                         break;
@@ -707,17 +851,52 @@ std::vector<uint8_t> digitSprites = {
     0x80,
 };
 
+void usage(const char *name)
+{
+    fprintf(stderr, "usage: %s [options] ROM.o8\n", name);
+    fprintf(stderr, "options:\n");
+    fprintf(stderr, "\t-rate N      # issue N instructions per 60Hz field\n");
+}
+
 int main(int argc, char **argv)
 {
+    const char *progname = argv[0];
+    argc -= 1;
+    argv += 1;
+
     Memory memory;
     Interface interface;
+    int ticksPerField = 7;
 
-    if(argc != 2) {
-        fprintf(stderr, "usage: %s ROM.o8\n", argv[0]);
+    while((argc > 0) && (argv[0][0] == '-')) {
+	if(strcmp(argv[0], "--rate") == 0) {
+            if(argc < 2) {
+                fprintf(stderr, "--rate option requires a rate number value.\n");
+                exit(EXIT_FAILURE);
+            }
+            ticksPerField = atoi(argv[1]);
+            argv += 2;
+            argc -= 2;
+        } else if(
+            (strcmp(argv[0], "-help") == 0) ||
+            (strcmp(argv[0], "-h") == 0) ||
+            (strcmp(argv[0], "-?") == 0))
+        {
+            usage(progname);
+            exit(EXIT_SUCCESS);
+	} else {
+	    fprintf(stderr, "unknown parameter \"%s\"\n", argv[0]);
+            usage(progname);
+	    exit(EXIT_FAILURE);
+	}
+    }
+
+    if(argc < 1) {
+        usage(progname);
         exit(EXIT_FAILURE);
     }
 
-    FILE *fp = fopen(argv[1], "rb");
+    FILE *fp = fopen(argv[0], "rb");
     fseek(fp, 0, SEEK_END);
     long size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
@@ -740,26 +919,21 @@ int main(int argc, char **argv)
     struct timeval interfaceThen, interfaceNow;
     gettimeofday(&interfaceThen, nullptr);
 
-    int instructionsPerSecond = 1000;
-
     bool done = false;
     while(!done) {
-        float dt = 0.0;
 
-        struct timeval instructionThen, instructionNow;
-        gettimeofday(&instructionThen, nullptr);
-        chip8.step(memory, interface);
-        do {
-            gettimeofday(&instructionNow, nullptr);
-            dt = instructionNow.tv_sec + instructionNow.tv_usec / 1000000.0 - (instructionThen.tv_sec + instructionThen.tv_usec / 1000000.0);
-        } while(dt < 1.0 / instructionsPerSecond);
-
-        gettimeofday(&interfaceNow, nullptr);
-        dt = interfaceNow.tv_sec + interfaceNow.tv_usec / 1000000.0 - (interfaceThen.tv_sec + interfaceThen.tv_usec / 1000000.0);
-        if(dt > .0166f) {
-            done = !interface.iterate();
-            chip8.tick(interface);
-            interfaceThen = interfaceNow;
+        for(int i = 0; i < ticksPerField; i++) {
+            chip8.step(memory, interface);
         }
+
+        float dt;
+        do { 
+            gettimeofday(&interfaceNow, nullptr);
+            dt = interfaceNow.tv_sec + interfaceNow.tv_usec / 1000000.0 - (interfaceThen.tv_sec + interfaceThen.tv_usec / 1000000.0);
+        } while(dt < .0166f);
+
+        done = !interface.iterate();
+        chip8.tick(interface);
+        interfaceThen = interfaceNow;
     }
 }
