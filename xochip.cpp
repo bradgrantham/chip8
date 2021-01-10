@@ -21,18 +21,7 @@ Make display be 128x64, move wrapping out of interface into interpreter
 CLI args to set interface colors --color {0,1,2,3} RRGGBB (matches Octo JSON #RRGGBB, what about names?)
 CLI to set platform --platform {chip8,schip,xochip}
 CLI to set quirks --quirk {shift,loadstore,jump,clip}
-CLI to set tick rate (which is? per second?  per field?) --ticks NN
 
-enum ChipPlatform { CHIP8, SCHIP_1_1, XOCHIP };
-ChipPlatform platform;
-static constexpr uint32_t QUIRK_SHIFT = 0x01;           /* shift VX instead of VY */
-static constexpr uint32_t QUIRK_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
-static constexpr uint32_t QUIRK_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
-static constexpr uint32_t QUIRK_CLIP = 0x08;            /* no draw or collide wrapped, VX += rows off bottom */
-uint32_t quirks;
-bool extendedScreenMode = false;
-uint32_t screenPlaneMask = 0x1;
-add mode and quirks to Chip8Interpreter constructor
 SuperChip implies certain quirks, but turn those on from command line
     command-line flags - --mode turns on quirks, can turn on and off with args after that too
     That way platform turns on new functionality and quirks sets incompatible behavior
@@ -157,22 +146,42 @@ FX55/FX65 do not increase I
 
 constexpr bool debug = false;
 
+constexpr uint32_t QUIRKS_NONE = 0x01;           /* shift VX instead of VY */
+constexpr uint32_t QUIRKS_SHIFT = 0x01;           /* shift VX instead of VY */
+constexpr uint32_t QUIRKS_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
+constexpr uint32_t QUIRKS_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
+constexpr uint32_t QUIRKS_CLIP = 0x08;            /* no draw or collide wrapped, VX += rows off bottom */
+
+enum ChipPlatform
+{
+    CHIP8,
+    SCHIP_1_1,
+    XOCHIP
+};
+
 template <class MEMORY, class INTERFACE>
 struct Chip8Interpreter
 {
+    ChipPlatform platform;
+    uint32_t quirks;
+
     std::array<uint8_t, 16> registers = {0};
     std::vector<uint16_t> stack;
     uint16_t I = 0;
     uint16_t pc = 0;
     uint16_t DT = 0;
     uint16_t ST = 0;
+    bool extendedScreenMode = false;
+    uint32_t screenPlaneMask = 0x1;
 
     bool waitingForKeyPress = false;
     bool waitingForKeyRelease = false;
     uint8_t keyPressed;
     uint8_t keyDestinationRegister;
 
-    Chip8Interpreter(uint16_t initialPC) :
+    Chip8Interpreter(uint16_t initialPC, ChipPlatform platform, uint32_t quirks) :
+        platform(platform),
+        quirks(quirks),
         pc(initialPC)
     {
     }
@@ -914,7 +923,7 @@ int main(int argc, char **argv)
         }
     }
 
-    Chip8Interpreter<Memory,Interface> chip8(0x200);
+    Chip8Interpreter<Memory,Interface> chip8(0x200, /* ChipPlatform:: */ CHIP8, QUIRKS_NONE);
 
     struct timeval interfaceThen, interfaceNow;
     gettimeofday(&interfaceThen, nullptr);
