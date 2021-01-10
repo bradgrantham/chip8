@@ -1,3 +1,5 @@
+#include <map>
+#include <string>
 #include <array>
 #include <vector>
 #include <cstdio>
@@ -8,15 +10,9 @@
 
 #if 0
 
+SuperChip implies all quirks
+    does XOCHIP imply SCHIP_1_1 quirks? unclear.
 
-CLI args to set interface colors --color {0,1,2,3} RRGGBB (matches Octo JSON #RRGGBB, what about names?)
-CLI to set platform --platform {chip8,schip,xochip}
-CLI to set quirks --quirk {shift,loadstore,jump,clip}
-
-SuperChip implies certain quirks, but turn those on from command line
-    command-line flags - --mode turns on quirks, can turn on and off with args after that too
-    That way platform turns on new functionality and quirks sets incompatible behavior
-make memory be 64K
 All skip instructions
     // The conditional skip instructions 0xEN9E (if -key then), 0xENA1 (if key then), 0x3XNN (if vx == NN then), 0x4XNN (if vx != NN then), 0x5XY0 (if vx == vy then) and 0x9XY0 (if vx != NN) will skip over this double-wide instruction, rather than skipping halfway through it.
     if(platform == XOCHIP) {
@@ -603,28 +599,97 @@ struct Chip8Interpreter
     }
 };
 
+std::vector<uint8_t> digitSprites = {
+    0xF0, 0x90, 0x90, 0x90, 0xF0,
+    0x20, 0x60, 0x20, 0x20, 0x70,
+    0xF0, 0x10, 0xF0, 0x80, 0xF0,
+    0xF0, 0x10, 0xF0, 0x10, 0xF0,
+    0x90, 0x90, 0xF0, 0x10, 0x10,
+    0xF0, 0x80, 0xF0, 0x10, 0xF0,
+    0xF0, 0x80, 0xF0, 0x90, 0xF0,
+    0xF0, 0x10, 0x20, 0x40, 0x40,
+    0xF0, 0x90, 0xF0, 0x90, 0xF0,
+    0xF0, 0x90, 0xF0, 0x10, 0xF0,
+    0xF0, 0x90, 0xF0, 0x90, 0x90,
+    0xE0, 0x90, 0xE0, 0x90, 0xE0,
+    0xF0, 0x80, 0x80, 0x80, 0xF0,
+    0xE0, 0x90, 0x90, 0x90, 0xE0,
+    0xF0, 0x80, 0xF0, 0x80, 0xF0,
+    0xF0, 0x80, 0xF0, 0x80, 0x80,
+};
+
+std::vector<uint8_t> largeDigitSprites = {
+    // TBD
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+};
+
 struct Memory
 {
-    std::array<uint8_t, 4096> memory;
+    std::array<uint8_t, 65536> memory;
 
     std::array<uint16_t, 16> digitAddresses;
+
+    std::array<uint16_t, 10> largeDigitAddresses = {0};
+
+    ChipPlatform platform;
+
+    Memory(ChipPlatform platform) :
+        platform(platform)
+    {
+        for(size_t i = 0; i < digitSprites.size(); i++) {
+            write(0x200 - 80 + i, digitSprites[i]);
+            if(i % 5 == 0) {
+                digitAddresses[i / 5] = 0x200 - 80 + i;
+            }
+        }
+        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+            for(size_t i = 0; i < largeDigitSprites.size(); i++) {
+                write(0x200 - 80 - largeDigitSprites.size() + i, largeDigitSprites[i]);
+                if(i % 10 == 0) {
+                    largeDigitAddresses[i / 5] = 0x200 - 80 - largeDigitSprites.size() + i;
+                }
+            }
+        }
+    }
 
     uint8_t read(uint16_t addr)
     {
         if(false)printf("read(%x) -> %x\n", addr, memory[addr]);
-        assert(addr < 4096);
+        if((platform == CHIP8) || (platform == SCHIP_1_1)) {
+            assert(addr < 4096);
+        }
         return memory[addr];
     }
 
     void write(uint16_t addr, uint8_t v)
     {
-        assert(addr < 4096);
+        if((platform == CHIP8) || (platform == SCHIP_1_1)) {
+            assert(addr < 4096);
+        }
         memory[addr] = v;
     }
 
     uint16_t getDigitLocation(uint8_t digit)
     {
         return digitAddresses[digit];
+    }
+
+    uint16_t getLargeDigitLocation(uint8_t digit)
+    {
+        if(!((platform == CHIP8) || (platform == SCHIP_1_1))) {
+            abort();
+        }
+        assert(digit < 10);
+        return largeDigitAddresses[digit];
     }
 };
 
@@ -782,111 +847,26 @@ struct Interface
     }
 };
 
-std::vector<uint8_t> digitSprites = {
-    0xF0,
-    0x90,
-    0x90,
-    0x90,
-    0xF0,
-    
-    0x20,
-    0x60,
-    0x20,
-    0x20,
-    0x70,
-    
-    0xF0,
-    0x10,
-    0xF0,
-    0x80,
-    0xF0,
-    
-    0xF0,
-    0x10,
-    0xF0,
-    0x10,
-    0xF0,
-            
-    0x90,
-    0x90,
-    0xF0,
-    0x10,
-    0x10,
-    
-    0xF0,
-    0x80,
-    0xF0,
-    0x10,
-    0xF0,
-    
-    0xF0,
-    0x80,
-    0xF0,
-    0x90,
-    0xF0,
-    
-    0xF0,
-    0x10,
-    0x20,
-    0x40,
-    0x40,
-   
-    0xF0,
-    0x90,
-    0xF0,
-    0x90,
-    0xF0,
-
-    0xF0,
-    0x90,
-    0xF0,
-    0x10,
-    0xF0,
-    
-    0xF0,
-    0x90,
-    0xF0,
-    0x90,
-    0x90,
-    
-    0xE0,
-    0x90,
-    0xE0,
-    0x90,
-    0xE0,
-
-    0xF0,
-    0x80,
-    0x80,
-    0x80,
-    0xF0,
-    
-    0xE0,
-    0x90,
-    0x90,
-    0x90,
-    0xE0,
-    
-    0xF0,
-    0x80,
-    0xF0,
-    0x80,
-    0xF0,
-    
-    0xF0,
-    0x80,
-    0xF0,
-    0x80,
-    0x80,
-};
-
 void usage(const char *name)
 {
     fprintf(stderr, "usage: %s [options] ROM.o8\n", name);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "\t--rate N           # issue N instructions per 60Hz field\n");
-    fprintf(stderr, "\t--color N RRGGBB   # set color N to RRGGBB\n");
+    fprintf(stderr, "\t--rate N           - issue N instructions per 60Hz field\n");
+    fprintf(stderr, "\t--color N RRGGBB   - set color N to RRGGBB\n");
+    fprintf(stderr, "\t--platform name    - enable platform, \"schip\" or \"xochip\"\n");
+    fprintf(stderr, "\t--quirk name       - enable SCHIP quirk\n");
+    fprintf(stderr, "\t                     \"jump\" : bits 11-8 of BNNN are also register number\n");
+    fprintf(stderr, "\t                     \"shift\" : shift operates on Vx, not Vy\n");
+    fprintf(stderr, "\t                     \"clip\" : sprites are not wrapped of sprites\n");
+    fprintf(stderr, "\t                     \"loadstore\" : multi-register Vx load/store doesn't change I \n");
 }
+
+std::map<std::string, uint32_t> keywordsToQuirkValues = {
+    {"shift", QUIRKS_SHIFT},
+    {"loadstore", QUIRKS_LOAD_STORE},
+    {"jump", QUIRKS_JUMP},
+    {"clip", QUIRKS_CLIP},
+};
 
 int main(int argc, char **argv)
 {
@@ -894,14 +874,17 @@ int main(int argc, char **argv)
     argc -= 1;
     argv += 1;
 
-    Memory memory;
+    Memory memory(CHIP8);
     Interface interface;
     int ticksPerField = 7;
+    ChipPlatform platform = CHIP8;
+    uint32_t quirks = QUIRKS_NONE;
 
     while((argc > 0) && (argv[0][0] == '-')) {
 	if(strcmp(argv[0], "--color") == 0) {
             if(argc < 3) {
                 fprintf(stderr, "--color option requires a color number and color.\n");
+                usage(progname);
                 exit(EXIT_FAILURE);
             }
             int colorIndex = atoi(argv[1]);
@@ -910,9 +893,42 @@ int main(int argc, char **argv)
             interface.colorTable[colorIndex] = color;
             argv += 3;
             argc -= 3;
+        } else if(strcmp(argv[0], "--platform") == 0) {
+            if(argc < 2) {
+                fprintf(stderr, "--platform option requires a platform name.\n");
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            if(strcmp(argv[1], "schip") == 0) {
+                platform = SCHIP_1_1;
+            } else if(strcmp(argv[1], "xochip") == 0) {
+                platform = XOCHIP;
+            } else {
+                fprintf(stderr, "unknown platform name \"%s\".\n", argv[1]);
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            argv += 2;
+            argc -= 2;
+        } else if(strcmp(argv[0], "--quirk") == 0) {
+            if(argc < 2) {
+                fprintf(stderr, "--quirk option requires a quirk keyword.\n");
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            std::string quirkKeyword = argv[1];
+            if(keywordsToQuirkValues.count(quirkKeyword) == 0) {
+                fprintf(stderr, "unknown quirk keyword \"%s\".\n", argv[1]);
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            quirks |= keywordsToQuirkValues.at(quirkKeyword);
+            argv += 2;
+            argc -= 2;
         } else if(strcmp(argv[0], "--rate") == 0) {
             if(argc < 2) {
                 fprintf(stderr, "--rate option requires a rate number value.\n");
+                usage(progname);
                 exit(EXIT_FAILURE);
             }
             ticksPerField = atoi(argv[1]);
@@ -948,14 +964,7 @@ int main(int argc, char **argv)
     }
     fclose(fp);
 
-    for(size_t i = 0; i < digitSprites.size(); i++) {
-        memory.write(0x200 - 80 + i, digitSprites[i]);
-        if(i % 5 == 0) {
-            memory.digitAddresses[i / 5] = 0x200 - 80 + i;
-        }
-    }
-
-    Chip8Interpreter<Memory,Interface> chip8(0x200, /* ChipPlatform:: */ CHIP8, QUIRKS_NONE);
+    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks);
 
     struct timeval interfaceThen, interfaceNow;
     gettimeofday(&interfaceThen, nullptr);
