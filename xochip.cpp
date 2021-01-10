@@ -884,7 +884,8 @@ void usage(const char *name)
 {
     fprintf(stderr, "usage: %s [options] ROM.o8\n", name);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "\t-rate N      # issue N instructions per 60Hz field\n");
+    fprintf(stderr, "\t--rate N           # issue N instructions per 60Hz field\n");
+    fprintf(stderr, "\t--color N RRGGBB   # set color N to RRGGBB\n");
 }
 
 int main(int argc, char **argv)
@@ -898,7 +899,18 @@ int main(int argc, char **argv)
     int ticksPerField = 7;
 
     while((argc > 0) && (argv[0][0] == '-')) {
-	if(strcmp(argv[0], "--rate") == 0) {
+	if(strcmp(argv[0], "--color") == 0) {
+            if(argc < 3) {
+                fprintf(stderr, "--color option requires a color number and color.\n");
+                exit(EXIT_FAILURE);
+            }
+            int colorIndex = atoi(argv[1]);
+            uint32_t colorName = strtoul(argv[2], nullptr, 16);
+            vec3ub color { (colorName >> 16) & 0xff, (colorName >> 8) & 0xff, colorName & 0xff };
+            interface.colorTable[colorIndex] = color;
+            argv += 3;
+            argc -= 3;
+        } else if(strcmp(argv[0], "--rate") == 0) {
             if(argc < 2) {
                 fprintf(stderr, "--rate option requires a rate number value.\n");
                 exit(EXIT_FAILURE);
