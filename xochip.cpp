@@ -8,18 +8,7 @@
 #include <cstring>
 #include <sys/time.h>
 
-#if 0
 
-DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision. If N=0 and extended mode, show 16x16 sprite.
-    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-        handle case of N=0 and extended mode
-    }
-    if(quirks & QUIRK_CLIP and extended mode) {
-        set VF to number of collided rows
-        dont draw wrapped, add clipped bottom rows to VF
-    }
-
-#endif
 
 
 #include <MiniFB.h>
@@ -101,9 +90,9 @@ struct Chip8Interpreter
 
     enum Series5Opcode // 5XYN low nybble
     {
-        HIGH5_SE_REG = 0x0;
-        HIGH5_LD_I_VXVY = 0x2;
-        HIGH5_LD_VXVY_I = 0x3;
+        HIGH5_SE_REG = 0x0,
+        HIGH5_LD_I_VXVY = 0x2,
+        HIGH5_LD_VXVY_I = 0x3,
     };
 
     enum SYSOpcode
@@ -130,12 +119,12 @@ struct Chip8Interpreter
         SPECIAL_LD_BCD = 0x33,
         SPECIAL_LD_IVX = 0x55,
         SPECIAL_LD_VXI = 0x65,
-        SPECIAL_STORE_RPL = 0x75; // XXX ignored 
-        SPECIAL_LOAD_RPL = 0x85; // XXX ignored 
+        SPECIAL_STORE_RPL = 0x75, // XXX ignored 
+        SPECIAL_LD_RPL = 0x85, // XXX ignored 
         SPECIAL_LD_BIGDIGIT = 0x30,
         SPECIAL_LD_I_16BIT = 0x00,
         SPECIAL_SET_PLANES = 0x01,
-        SPECIAL_SET_AUDIO = 0x01,
+        SPECIAL_SET_AUDIO = 0x02,
     };
 
     enum SKPOpcode {
@@ -234,7 +223,7 @@ struct Chip8Interpreter
                     }
                     case SYS_SCROLL_RIGHT_4: { // 00FB*    Scroll display 4 pixels right
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            interface->scroll(-4, 0);
+                            interface.scroll(-4, 0);
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL RIGHT 4) - does this ROM require \"schip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -243,7 +232,7 @@ struct Chip8Interpreter
                     }
                     case SYS_SCROLL_LEFT_4: { // 00FC*    Scroll display 4 pixels left
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            interface->scroll(4, 0);
+                            interface.scroll(4, 0);
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL ELFT 4) - does this ROM require \"schip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -281,7 +270,7 @@ struct Chip8Interpreter
                         if((sysOpcode & 0xFF0) == SYS_SCROLL_UP) {
                             // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
                             if(platform == XOCHIP) {
-                                interface->scroll(0, n);
+                                interface.scroll(0, imm4Argument);
                             } else {
                                 fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL UP) - does this ROM require \"xochip\" features?\n", instructionWord);
                                 stepResult = UNSUPPORTED_INSTRUCTION;
@@ -289,7 +278,7 @@ struct Chip8Interpreter
                         } else if((sysOpcode & 0xFF0) == SYS_SCROLL_DOWN) {
                             // 00CN*    Scroll display N lines down
                             if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                                interface->scroll(0, -n);
+                                interface.scroll(0, -imm4Argument);
                             } else {
                                 fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL DOWN) - does this ROM require \"schip\" features?\n", instructionWord);
                                 stepResult = UNSUPPORTED_INSTRUCTION;
@@ -348,7 +337,7 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_HIGH5: {
-                uint8_t opcode = instructionWord && 0xF;
+                uint8_t opcode = instructionWord & 0xF;
                 switch(opcode) {
                     case HIGH5_LD_I_VXVY : { // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
                         if(platform == XOCHIP) {
@@ -522,26 +511,46 @@ struct Chip8Interpreter
                 // is outside the coordinates of the display, it wraps around to the opposite side of
                 // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
                 // Display, for more information on the Chip-8 screen and sprites.
-                bool erased = 0;
+                int erased = 0;
                 if(debug)printf("%04X: (%04X) DRW V%X, V%X, %X\n", pc, instructionWord, xArgument, yArgument, imm4Argument);
-                for(int rowIndex = 0; rowIndex < imm4Argument; rowIndex++) {
-                    uint8_t byte = memory.read(I + rowIndex);
-                    for(int bitIndex = 0; bitIndex < 8; bitIndex++) {
-                        int x = registers[xArgument] + bitIndex;
-                        int y = registers[yArgument] + rowIndex;
-                        x = x % 64;
-                        y = y % 32;
-                        bool oneErased = false;
-                        for(int ygrid = 0; ygrid < 2; ygrid++) {
-                            for(int xgrid = 0; xgrid < 2; xgrid++) {
-                                oneErased = interface.draw(x * 2 + xgrid, y * 2 + ygrid, (byte >> (7U - bitIndex)) & 0x1U, 0x1);
+                if(extendedScreenMode && (imm4Argument == 0)) {
+                    // 16x16 sprite
+                } else {
+                    for(int rowIndex = 0; rowIndex < imm4Argument; rowIndex++) {
+                        for(int bitplane = 0; bitplane < 2; bitplane++) {
+                            if(screenPlaneMask & (1 << bitplane)) {
+                                uint8_t byte = memory.read(I + rowIndex);
+                                for(int bitIndex = 0; bitIndex < 8; bitIndex++) {
+                                    int x = registers[xArgument] + bitIndex;
+                                    int y = registers[yArgument] + rowIndex;
+                                    x = x % 64;
+                                    y = y % 32;
+                                    bool oneErased = false;
+                                    for(int ygrid = 0; ygrid < 2; ygrid++) {
+                                        for(int xgrid = 0; xgrid < 2; xgrid++) {
+                                            oneErased = interface.draw(x * 2 + xgrid, y * 2 + ygrid, (byte >> (7U - bitIndex)) & 0x1U, 0x1);
+                                        }
+                                    }
+                                    erased += oneErased ? 1 : 0;
+                                }
                             }
                         }
-                        erased |= oneErased;
                     }
                 }
                 registers[0xF] = erased ? 1 : 0;
                 pc += 2;
+#if 0
+DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
+    If N=0 and extended mode, show 16x16 sprite.
+    for each enabled  planes, show sprite
+    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+        handle case of N=0 and extended mode
+    }
+    if(quirks & QUIRK_CLIP and extended mode) {
+        set VF to number of collided rows
+        dont draw wrapped, add clipped bottom rows to VF
+    }
+#endif
                 break;
             }
             case INSN_SKP: {
@@ -674,7 +683,7 @@ struct Chip8Interpreter
                         if(platform == XOCHIP) {
                             uint8_t hiImm16 = memory.read(pc + 2);
                             uint8_t loImm16 = memory.read(pc + 3);
-                            i = hiImm16 * 256 + loImm16;
+                            I = hiImm16 * 256 + loImm16;
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -684,7 +693,7 @@ struct Chip8Interpreter
                     }
                     case SPECIAL_SET_PLANES: { // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
                         if(platform == XOCHIP) {
-                            screen_planeMask = xArgument;
+                            screenPlaneMask = xArgument;
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -812,13 +821,18 @@ struct Memory
 
 typedef std::array<uint8_t, 3> vec3ub;
 
+vec3ub vec3ubFromInts(int r, int g, int b)
+{
+    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
+}
+
 struct Interface
 {
-    std::array<std::array<uint8_t, 128>, 64> display = {0};
+    std::array<std::array<uint8_t, 128>, 64> display;
     std::array<vec3ub, 256> colorTable;
-    bool displayChanged = false;
+    bool displayChanged = true;
     bool closed = false;
-    std::array<bool, 16> keyPressed = {0};
+    std::array<bool, 16> keyPressed;
 
     bool succeeded = false;
 
@@ -837,6 +851,7 @@ struct Interface
                     int srcx = x + dx;
                     if((srcx >= 0) && (srcx < 128)) {
                         display.at(y).at(x) = display.at(srcy).at(srcx);
+                    }
                 }
             }
         }
@@ -871,7 +886,7 @@ struct Interface
         Interface *ifc = static_cast<Interface *>(mfb_get_user_data(window));
         ifc->resize(width, height);
         // Optionally you can also change the viewport size
-        // mfb_set_viewport(window, 0, 0, width, height);
+        mfb_set_viewport(window, 0, 0, width, height);
     }
 
     void keyboard(mfb_key key, mfb_key_mod mod, bool isPressed)
@@ -918,7 +933,9 @@ struct Interface
         } else {
             success = (mfb_update_events(window) >= 0);
         }
-        // mfb_wait_sync(window);
+        if(success) {
+            mfb_wait_sync(window);
+        }
         return success && !closed;
     }
 
@@ -974,7 +991,11 @@ struct Interface
 
     void clear()
     {
-        display = {0};
+        for(auto& rowOfPixels : display) {
+            for(auto& pixel : rowOfPixels) {
+                pixel = 0;
+            }
+        }
     }
 };
 
@@ -1020,7 +1041,7 @@ int main(int argc, char **argv)
             }
             int colorIndex = atoi(argv[1]);
             uint32_t colorName = strtoul(argv[2], nullptr, 16);
-            vec3ub color { (colorName >> 16) & 0xff, (colorName >> 8) & 0xff, colorName & 0xff };
+            vec3ub color = vec3ubFromInts((colorName >> 16) & 0xff, (colorName >> 8) & 0xff, colorName & 0xff);
             interface.colorTable[colorIndex] = color;
             argv += 3;
             argc -= 3;
