@@ -1,7 +1,3 @@
-[submodule "lib/nlohmann_json"]
-	path = lib/nlohmann_json
-	url = https://github.com/nlohmann/json
-        shallow = true
 [submodule "lib/minifb"]
 	path = lib/minifb
 	url = https://github.com/emoon/minifb
