@@ -32,6 +32,8 @@ Run all ROMs from bash (you'll have to interrupt the bash command-line):
     cat roms.txt | while read name ; do echo $name 2>&1 ; PATH=$PATH:`pwd`/build `build/launcher ../chip8Archive/programs.json ../chip8Archive/roms $name` ; done
 ```
 
+Alternatively, the script `RUN_ALL_ROMS` will run that command.
+
 Most ROMs don't work properly at the moment and a few may exit due to an assert but to my knowledge none crash.  I use [John Earnest's OctoJam page of ROMs that run in the browser](https://johnearnest.github.io/chip8Archive/) as my reference.
 
 This has been tested on MacOS 10.14, MacOS 10.15, and Debian 10 Linux.
