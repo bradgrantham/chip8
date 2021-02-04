@@ -1,0 +1,2 @@
+export PATH=$PATH:`pwd`/build
+cat roms.txt | while read name ; do echo $name 2>&1 ; `build/launcher chip8Archive/programs.json chip8Archive/roms $name` ; done
