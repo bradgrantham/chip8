@@ -4,18 +4,17 @@
 #include <vector>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cassert>
 #include <cstring>
 #include <sys/time.h>
-
-
-
+#include <libgen.h>
 
 #include <MiniFB.h>
 
 constexpr bool debug = false;
 
-constexpr uint32_t QUIRKS_NONE = 0x01;           /* shift VX instead of VY */
+constexpr uint32_t QUIRKS_NONE = 0x00;
 constexpr uint32_t QUIRKS_SHIFT = 0x01;           /* shift VX instead of VY */
 constexpr uint32_t QUIRKS_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
 constexpr uint32_t QUIRKS_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
@@ -28,11 +27,15 @@ enum ChipPlatform
     XOCHIP
 };
 
+void disassemble(uint16_t pc, uint16_t instructionWord, uint16_t wordAfter);
+
 template <class MEMORY, class INTERFACE>
 struct Chip8Interpreter
 {
     ChipPlatform platform;
     uint32_t quirks;
+
+    uint64_t clock = 0;
 
     std::array<uint8_t, 16> registers = {0};
     std::vector<uint16_t> stack;
@@ -104,8 +107,8 @@ struct Chip8Interpreter
         SYS_SCROLL_RIGHT_4 = 0xFB,
         SYS_SCROLL_LEFT_4 = 0xFC,
         SYS_EXIT = 0xFD,
-        SYS_EXTENDED_SCREEN = 0xFE,
-        SYS_ORIGINAL_SCREEN = 0xFF,
+        SYS_ORIGINAL_SCREEN = 0xFE,
+        SYS_EXTENDED_SCREEN = 0xFF,
     };
 
     enum SPECIALOpcode
@@ -149,7 +152,7 @@ struct Chip8Interpreter
         EXIT_INTERPRETER,
         UNSUPPORTED_INSTRUCTION,
     };
-    
+
     StepResult step(MEMORY& memory, INTERFACE& interface)
     {
         StepResult stepResult = CONTINUE;
@@ -161,6 +164,7 @@ struct Chip8Interpreter
         uint16_t imm12Argument = instructionWord & 0x0FFF;
         uint16_t xArgument = (instructionWord & 0x0F00) >> 8;
         uint16_t yArgument = (instructionWord & 0x00F0) >> 4;
+        int highNybble = instructionWord >> 12;
 
         if(waitingForKeyPress) {
 
@@ -196,14 +200,25 @@ struct Chip8Interpreter
             }
         }
 
-        int highNybble = instructionWord >> 12;
-
         if(debug) {
-            printf("CHIP8: pc:%04X I:%04X DT:%02X ST:%02X ", pc, I, DT, ST);
+            printf("CHIP8: clk:%llu pc:%04X I:%04X ", clock++, pc, I);
             for(int i = 0; i < 16; i++) {
                 printf("%02X ", registers[i]);
             }
             puts("");
+            uint8_t hiByte = memory.read(pc);
+            uint8_t loByte = memory.read(pc + 1);
+            uint16_t wordAfter = hiByte * 256 + loByte;
+            disassemble(pc, instructionWord, wordAfter);
+
+            if(clock >= 43757) {
+                for(int row = 0; row < 32; row++) {
+                    for(int col = 0; col < 64; col++) {
+                        printf("%c", interface.display.at(row * 2).at(col * 2) ? '#' : '.');
+                    }
+                    puts("");
+                }
+            }
         }
 
         switch(highNybble) {
@@ -211,12 +226,10 @@ struct Chip8Interpreter
                 uint16_t sysOpcode = instructionWord & 0xFFF;
                 switch(sysOpcode) {
                     case SYS_CLS: { // 00E0 - CLS - Clear the display.
-                        if(debug)printf("%04X: (%04X) CLS\n", pc, instructionWord);
                         interface.clear();
                         break;
                     }
                     case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
-                        if(debug)printf("%04X: (%04X) RET\n", pc, instructionWord);
                         pc = stack.back();
                         stack.pop_back();
                         break;
@@ -248,7 +261,7 @@ struct Chip8Interpreter
                         }
                         break;
                     }
-                    case SYS_EXTENDED_SCREEN: { // 00FE*    Disable extended screen mode
+                    case SYS_EXTENDED_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = true;
                         } else {
@@ -257,7 +270,7 @@ struct Chip8Interpreter
                         }
                         break;
                     }
-                    case SYS_ORIGINAL_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
+                    case SYS_ORIGINAL_SCREEN: { // 00FE*    Disable extended screen mode
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = false;
                         } else {
@@ -294,18 +307,15 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
-                if(debug)printf("%04X: (%04X) JP %X\n", pc, instructionWord, imm12Argument);
                 pc = imm12Argument;
                 break;
             }
             case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
-                if(debug)printf("%04X: (%04X) CALL %X\n", pc, instructionWord, imm12Argument);
                 stack.push_back(pc);
                 pc = imm12Argument;
                 break;
             }
             case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
-                if(debug)printf("%04X: (%04X) SE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
                 if(registers[xArgument] == imm8Argument) {
                     if(platform == XOCHIP) {
                         uint8_t hiByte = memory.read(pc);
@@ -321,7 +331,6 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
-                if(debug)printf("%04X: (%04X) SNE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
                 if(registers[xArgument] != imm8Argument) {
                     if(platform == XOCHIP) {
                         uint8_t hiByte = memory.read(pc);
@@ -362,7 +371,6 @@ struct Chip8Interpreter
                         break;
                     }
                     case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
-                        if(debug)printf("%04X: (%04X) SE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
                         if(registers[xArgument] == registers[yArgument]) {
                             pc += 4;
                         } else {
@@ -381,13 +389,11 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_LD_IMM: { // 6xkk - LD Vx, byte - Set Vx = kk.  The interpreter puts the value kk into register Vx.  
-                if(debug)printf("%04X: (%04X) LD V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
                 registers[xArgument] = imm8Argument;
                 pc += 2;
                 break;
             }
             case INSN_ADD_IMM: { // 7xkk - ADD Vx, byte - Set Vx = Vx + kk.  Adds the value kk to the value of register Vx, then stores the result in Vx.
-                if(debug)printf("%04X: (%04X) ADD V%X, %X\n", pc, instructionWord, xArgument, imm8Argument);
                 registers[xArgument] = registers[xArgument] + imm8Argument;
                 pc += 2;
                 break;
@@ -396,46 +402,38 @@ struct Chip8Interpreter
                 int opcode = instructionWord & 0x000F;
                 switch(opcode) {
                     case ALU_LD: { // 8xy0 - LD Vx, Vy - Set Vx = Vy.  Stores the value of register Vy in register Vx.  
-                        if(debug)printf("%04X: (%04X) LD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] = registers[yArgument];
                         break;
                     }
                     case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
-                        if(debug)printf("%04X: (%04X) OR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] |= registers[yArgument];
                         break;
                     }
                     case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
-                        if(debug)printf("%04X: (%04X) AND V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] &= registers[yArgument];
                         break;
                     }
                     case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
-                        if(debug)printf("%04X: (%04X) XOR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[xArgument] ^= registers[yArgument];
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
-                        if(debug)printf("%04X: (%04X) ADD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         uint16_t result16 = registers[xArgument] + registers[yArgument];
                         registers[0xF] = (result16 > 255) ? 1 : 0;
                         registers[xArgument] = registers[xArgument] + registers[yArgument];
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        if(debug)printf("%04X: (%04X) SUB V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[0xF] = (registers[xArgument] >= registers[yArgument]) ? 1 : 0;
                         registers[xArgument] = registers[xArgument] - registers[yArgument];
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        if(debug)printf("%04X: (%04X) SUBN V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         registers[0xF] = (registers[yArgument] >= registers[xArgument]) ? 1 : 0;
                         registers[xArgument] = registers[yArgument] - registers[xArgument];
                         break;
                     }
                     case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
-                        if(debug)printf("%04X: (%04X) SHR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
@@ -444,7 +442,6 @@ struct Chip8Interpreter
                         break;
                     }
                     case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
-                        if(debug)printf("%04X: (%04X) SHL V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
@@ -462,7 +459,6 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
-                if(debug)printf("%04X: (%04X) SNE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
                 if(imm4Argument != 0) {
                     fprintf(stderr, "%04X: unsupported 9XY0 instruction %04X\n", pc, instructionWord);
                     stepResult = UNSUPPORTED_INSTRUCTION;
@@ -482,13 +478,11 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_LD_I: { // Annn - LD I, addr - Set I = nnn.  
-                if(debug)printf("%04X: (%04X) LD I %X\n", pc, instructionWord, imm12Argument);
                 I = imm12Argument;
                 pc += 2;
                 break;
             }
             case INSN_JP_V0: { // Bnnn - JP V0, addr - Jump to location nnn + V0.
-                if(debug)printf("%04X: (%04X) JP V0, %X\n", pc, instructionWord, imm12Argument);
                 if(quirks & QUIRKS_JUMP) { // Ugh!
                     pc = (imm12Argument & 0xFF) + registers[xArgument] + (xArgument << 8);
                 } else {
@@ -497,7 +491,6 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
-                if(debug)printf("%04X: (%04X) RND V%X, %X\n", pc, instructionWord, xArgument, imm8Argument);
                 registers[xArgument] = random() & 0xFF & imm8Argument;
                 pc += 2;
                 break;
@@ -512,32 +505,55 @@ struct Chip8Interpreter
                 // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
                 // Display, for more information on the Chip-8 screen and sprites.
                 int erased = 0;
-                if(debug)printf("%04X: (%04X) DRW V%X, V%X, %X\n", pc, instructionWord, xArgument, yArgument, imm4Argument);
+                int screenWidth = extendedScreenMode ? 128 : 64;
+                int screenHeight = extendedScreenMode ? 64 : 32;
+                int pixelScale = extendedScreenMode ? 1 : 2;
+                uint16_t spriteByteAddress = I;
+                int byteCount = 1;
+                int rowCount = imm4Argument;
                 if(extendedScreenMode && (imm4Argument == 0)) {
+                    rowCount = 16;
+                    byteCount = 2;
                     // 16x16 sprite
-                } else {
-                    for(int rowIndex = 0; rowIndex < imm4Argument; rowIndex++) {
-                        for(int bitplane = 0; bitplane < 2; bitplane++) {
-                            if(screenPlaneMask & (1 << bitplane)) {
-                                uint8_t byte = memory.read(I + rowIndex);
-                                for(int bitIndex = 0; bitIndex < 8; bitIndex++) {
-                                    int x = registers[xArgument] + bitIndex;
-                                    int y = registers[yArgument] + rowIndex;
-                                    x = x % 64;
-                                    y = y % 32;
-                                    bool oneErased = false;
-                                    for(int ygrid = 0; ygrid < 2; ygrid++) {
-                                        for(int xgrid = 0; xgrid < 2; xgrid++) {
-                                            oneErased = interface.draw(x * 2 + xgrid, y * 2 + ygrid, (byte >> (7U - bitIndex)) & 0x1U, 0x1);
+                }
+                for(int bitplane = 0; bitplane < 2; bitplane++) {
+                    uint8_t planeMask = 1 << bitplane;
+                    if(screenPlaneMask & planeMask) {
+                        for(uint32_t rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                            for(int byteIndex = 0; byteIndex < byteCount; byteIndex++) {
+                                uint8_t byte = memory.read(spriteByteAddress);
+                                spriteByteAddress++;
+                                for(uint32_t bitIndex = 0; bitIndex < 8; bitIndex++) {
+                                    bool hasPixel = (byte >> (7 - bitIndex)) & 0x1;
+                                    if(hasPixel) {
+                                        uint32_t x = registers[xArgument] + bitIndex + byteIndex * 8;
+                                        uint32_t y = registers[yArgument] + rowIndex;
+                                        uint32_t clipX = x % screenWidth;
+                                        uint32_t clipY = y + x / screenWidth;
+                                        bool oneErased = false;
+                                        if(debug) {
+                                            printf("draw %d %d (%d %d) (%d)\n", x, y, clipX, clipY, clipX + clipY * 64);
                                         }
+                                        if(clipY < screenHeight) {
+                                            for(int ygrid = 0; ygrid < pixelScale; ygrid++) {
+                                                for(int xgrid = 0; xgrid < pixelScale; xgrid++) {
+                                                    oneErased |= interface.draw(clipX * pixelScale + xgrid, clipY * pixelScale + ygrid, planeMask);
+                                                }
+                                            }
+                                        } else {
+                                            oneErased |= true;
+                                        }
+                                        if(oneErased && debug) {
+                                            printf("set VF\n");
+                                        }
+                                        erased += oneErased ? 1 : 0;
                                     }
-                                    erased += oneErased ? 1 : 0;
                                 }
                             }
                         }
                     }
                 }
-                registers[0xF] = erased ? 1 : 0;
+                registers[0xF] = (erased > 0) ? 1 : 0;
                 pc += 2;
 #if 0
 DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
@@ -557,7 +573,6 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                 int opcode = instructionWord & 0xFF;
                 switch(opcode) {
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
-                        if(debug)printf("%04X: (%04X) SKP V%X\n", pc, instructionWord, xArgument);
                         if(interface.pressed(xArgument)) {
                             if(platform == XOCHIP) {
                                 uint8_t hiByte = memory.read(pc);
@@ -572,7 +587,6 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
-                        if(debug)printf("%04X: (%04X) SKNP V%X\n", pc, instructionWord, xArgument);
                         if(!interface.pressed(xArgument)) {
                             if(platform == XOCHIP) {
                                 uint8_t hiByte = memory.read(pc);
@@ -599,25 +613,21 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                 int opcode = instructionWord & 0xFF;
                 switch(opcode) {
                     case SPECIAL_GET_DELAY: { // Fx07 - LD Vx, DT - Set Vx = delay timer value.  The value of DT is placed into Vx.
-                        if(debug)printf("%04X: (%04X) LD V%X, DT\n", pc, instructionWord, xArgument);
                         registers[xArgument] = DT;
                         break;
                     }
                     case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
-                        if(debug)printf("%04X: (%04X) LD V%X, K\n", pc, instructionWord, xArgument);
                         printf("waiting for key\n");
                         waitingForKeyPress = true;
                         keyDestinationRegister = xArgument;
                         break;
                     }
                     case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
-                        if(debug)printf("%04X: (%04X) LD DT, V%X\n", pc, instructionWord, xArgument);
 
                         DT = registers[xArgument];
                         break;
                     }
                     case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
-                        if(debug)printf("%04X: (%04X) LD ST, V%X\n", pc, instructionWord, xArgument);
                         ST = registers[xArgument];
                         if(ST > 0) {
                             interface.startSound();
@@ -625,17 +635,14 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SPECIAL_ADD_INDEX: { // Fx1E - ADD I, Vx - Set I = I + Vx.  The values of I and Vx are added, and the results are stored in I.  
-                        if(debug)printf("%04X: (%04X) ADD I, V%X\n", pc, instructionWord, xArgument);
                         I += registers[xArgument];
                         break;
                     }
                     case SPECIAL_LD_DIGIT: { // Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.  The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx. See section 2.4, Display, for more information on the Chip-8 hexadecimal font.  
-                        if(debug)printf("%04X: (%04X) LD F, V%X\n", pc, instructionWord, xArgument);
                         I = memory.getDigitLocation(registers[xArgument]);
                         break;
                     }
                     case SPECIAL_LD_BIGDIGIT: { // FX30* - Point I to 10-byte font sprite for digit VX (0..9)
-                        if(debug)printf("%04X: (%04X) LD BIGF, V%X\n", pc, instructionWord, xArgument);
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             I = memory.getBigDigitLocation(registers[xArgument]);
                         } else {
@@ -645,14 +652,12 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SPECIAL_LD_BCD: { // Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.  The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
-                        if(debug)printf("%04X: (%04X) LD B, V%X\n", pc, instructionWord, xArgument);
                         memory.write(I + 0, registers[xArgument] / 100);
                         memory.write(I + 1, (registers[xArgument] % 100) / 10);
                         memory.write(I + 2, registers[xArgument] % 10);
                         break;
                     }
                     case SPECIAL_LD_IVX: { // Fx55 - LD [I], Vx - Store registers V0 through Vx in memory starting at location I.  The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.  
-                        if(debug)printf("%04X: (%04X) LD [I], V%X\n", pc, instructionWord, xArgument);
                         for(int i = 0; i <= xArgument; i++) {
                             memory.write(I + i, registers[i]);
                         }
@@ -662,7 +667,6 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SPECIAL_LD_VXI: { // Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.  The interpreter reads values from memory starting at location I into registers V0 through Vx.
-                        if(debug)printf("%04X: (%04X) LD V%X, [I]\n", pc, instructionWord, xArgument);
                         for(int i = 0; i <= xArgument; i++) {
                             registers[i] = memory.read(I + i);
                         }
@@ -725,23 +729,376 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
     }
 };
 
+void disassemble(uint16_t pc, uint16_t instructionWord, uint16_t wordAfter)
+{
+    enum InstructionHighNybble
+    {
+        INSN_SYS = 0x0,
+        INSN_JP = 0x1,
+        INSN_CALL = 0x2,
+        INSN_SE_IMM = 0x3,
+        INSN_SNE_IMM = 0x4,
+        INSN_HIGH5 = 0x5,
+        INSN_LD_IMM = 0x6,
+        INSN_ADD_IMM = 0x7,
+        INSN_ALU = 0x8,
+        INSN_SNE_REG = 0x9,
+        INSN_LD_I = 0xA,
+        INSN_JP_V0 = 0xB,
+        INSN_RND = 0xC,
+        INSN_DRW = 0xD,
+        INSN_SKP = 0xE,
+        INSN_LD_SPECIAL = 0xF,
+    };
+
+    enum Series5Opcode // 5XYN low nybble
+    {
+        HIGH5_SE_REG = 0x0,
+        HIGH5_LD_I_VXVY = 0x2,
+        HIGH5_LD_VXVY_I = 0x3,
+    };
+
+    enum SYSOpcode
+    {
+        SYS_CLS = 0x0E0,
+        SYS_RET = 0x0EE,
+        SYS_SCROLL_DOWN = 0x0C0,
+        SYS_SCROLL_UP = 0x0D0,
+        SYS_SCROLL_RIGHT_4 = 0xFB,
+        SYS_SCROLL_LEFT_4 = 0xFC,
+        SYS_EXIT = 0xFD,
+        SYS_ORIGINAL_SCREEN = 0xFE,
+        SYS_EXTENDED_SCREEN = 0xFF,
+    };
+
+    enum SPECIALOpcode
+    {
+        SPECIAL_GET_DELAY = 0x07,
+        SPECIAL_KEYWAIT = 0x0A,
+        SPECIAL_SET_DELAY = 0x15,
+        SPECIAL_SET_SOUND = 0x18,
+        SPECIAL_ADD_INDEX = 0x1E,
+        SPECIAL_LD_DIGIT = 0x29,
+        SPECIAL_LD_BCD = 0x33,
+        SPECIAL_LD_IVX = 0x55,
+        SPECIAL_LD_VXI = 0x65,
+        SPECIAL_STORE_RPL = 0x75, // XXX ignored 
+        SPECIAL_LD_RPL = 0x85, // XXX ignored 
+        SPECIAL_LD_BIGDIGIT = 0x30,
+        SPECIAL_LD_I_16BIT = 0x00,
+        SPECIAL_SET_PLANES = 0x01,
+        SPECIAL_SET_AUDIO = 0x02,
+    };
+
+    enum SKPOpcode {
+        SKP_KEY = 0x9E,
+        SKNP_KEY = 0xA1,
+    };
+
+    enum ALUOpcode {
+        ALU_LD = 0x0,
+        ALU_OR = 0x1,
+        ALU_AND = 0x2,
+        ALU_XOR = 0x3,
+        ALU_ADD = 0x4,
+        ALU_SUB = 0x5,
+        ALU_SHR = 0x6,
+        ALU_SUBN = 0x7,
+        ALU_SHL = 0xE,
+    };
+
+    uint8_t imm8Argument = instructionWord & 0x00FF;
+    uint8_t imm4Argument = instructionWord & 0x000F;
+    uint16_t imm12Argument = instructionWord & 0x0FFF;
+    uint16_t xArgument = (instructionWord & 0x0F00) >> 8;
+    uint16_t yArgument = (instructionWord & 0x00F0) >> 4;
+    int highNybble = instructionWord >> 12;
+
+    switch(highNybble) {
+        case INSN_SYS: {
+            uint16_t sysOpcode = instructionWord & 0xFFF;
+            switch(sysOpcode) {
+                case SYS_CLS: { // 00E0 - CLS - Clear the display.
+                    printf("%04X: (%04X) CLS\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
+                    printf("%04X: (%04X) RET\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_SCROLL_RIGHT_4: { // 00FB*    Scroll display 4 pixels right
+                    printf("%04X: (%04X) SCROLLRIGHT 4\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_SCROLL_LEFT_4: { // 00FC*    Scroll display 4 pixels left
+                    printf("%04X: (%04X) SCROLLLEFT 4\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_EXIT: { // 00FD*    Exit CHIP interpreter
+                    printf("%04X: (%04X) EXIT\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_EXTENDED_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
+                    printf("%04X: (%04X) EXTENDEDSCREEN\n", pc, instructionWord);
+                    break;
+                }
+                case SYS_ORIGINAL_SCREEN: { // 00FE*    Disable extended screen mode
+                    printf("%04X: (%04X) ORIGINALSCREEN\n", pc, instructionWord);
+                    break;
+                }
+                default : { // Opcode undefined or is a range
+                    if((sysOpcode & 0xFF0) == SYS_SCROLL_UP) {
+                        printf("%04X: (%04X) SCROLLUP %d\n", pc, instructionWord, imm4Argument);
+                    } else if((sysOpcode & 0xFF0) == SYS_SCROLL_DOWN) {
+                        printf("%04X: (%04X) SCROLLDN %d\n", pc, instructionWord, imm4Argument);
+                    } else {
+                        printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    }
+                    break;
+                }
+            }
+            break;
+        }
+        case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
+            printf("%04X: (%04X) JP %X\n", pc, instructionWord, imm12Argument);
+            break;
+        }
+        case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
+            printf("%04X: (%04X) CALL %X\n", pc, instructionWord, imm12Argument);
+            break;
+        }
+        case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
+            printf("%04X: (%04X) SE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
+            break;
+        }
+        case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
+            printf("%04X: (%04X) SNE V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
+            break;
+        }
+        case INSN_HIGH5: {
+            uint8_t opcode = instructionWord & 0xF;
+            switch(opcode) {
+                case HIGH5_LD_I_VXVY : { // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
+                    printf("%04X: (%04X) LD I V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
+                    break;
+                }
+                case HIGH5_LD_VXVY_I : { // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
+                    printf("%04X: (%04X) LD V%X %X I\n", pc, instructionWord, xArgument, imm8Argument);
+                    break;
+                }
+                case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
+                    printf("%04X: (%04X) SE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                default : {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+            }
+            break;
+        }
+        case INSN_LD_IMM: { // 6xkk - LD Vx, byte - Set Vx = kk.  The interpreter puts the value kk into register Vx.  
+            printf("%04X: (%04X) LD V%X %X\n", pc, instructionWord, xArgument, imm8Argument);
+            break;
+        }
+        case INSN_ADD_IMM: { // 7xkk - ADD Vx, byte - Set Vx = Vx + kk.  Adds the value kk to the value of register Vx, then stores the result in Vx.
+            printf("%04X: (%04X) ADD V%X, %X\n", pc, instructionWord, xArgument, imm8Argument);
+            break;
+        }
+        case INSN_ALU: {
+            int opcode = instructionWord & 0x000F;
+            switch(opcode) {
+                case ALU_LD: { // 8xy0 - LD Vx, Vy - Set Vx = Vy.  Stores the value of register Vy in register Vx.  
+                    printf("%04X: (%04X) LD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
+                    printf("%04X: (%04X) OR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
+                    printf("%04X: (%04X) AND V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
+                    printf("%04X: (%04X) XOR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
+                    printf("%04X: (%04X) ADD V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
+                    printf("%04X: (%04X) SUB V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
+                    printf("%04X: (%04X) SUBN V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
+                    printf("%04X: (%04X) SHR V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
+                    printf("%04X: (%04X) SHL V%X, V%X\n", pc, instructionWord, xArgument, yArgument);
+                    break;
+                }
+                default : {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+            }
+            break;
+        }
+        case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
+            printf("%04X: (%04X) SNE V%X V%X\n", pc, instructionWord, xArgument, yArgument);
+            break;
+        }
+        case INSN_LD_I: { // Annn - LD I, addr - Set I = nnn.  
+            printf("%04X: (%04X) LD I %X\n", pc, instructionWord, imm12Argument);
+            break;
+        }
+        case INSN_JP_V0: { // Bnnn - JP V0, addr - Jump to location nnn + V0.
+            printf("%04X: (%04X) JP V0, %X\n", pc, instructionWord, imm12Argument);
+            break;
+        }
+        case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
+            printf("%04X: (%04X) RND V%X, %X\n", pc, instructionWord, xArgument, imm8Argument);
+            break;
+        }
+        case INSN_DRW: { // Dxyn - DRW Vx, Vy, nibble
+            printf("%04X: (%04X) DRW V%X, V%X, %X\n", pc, instructionWord, xArgument, yArgument, imm4Argument);
+            break;
+        }
+        case INSN_SKP: {
+            int opcode = instructionWord & 0xFF;
+            switch(opcode) {
+                case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
+                    printf("%04X: (%04X) SKP V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
+                    printf("%04X: (%04X) SKNP V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                default : {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+            }
+            break;
+        }
+        case INSN_LD_SPECIAL :{
+            int opcode = instructionWord & 0xFF;
+            switch(opcode) {
+                case SPECIAL_GET_DELAY: { // Fx07 - LD Vx, DT - Set Vx = delay timer value.  The value of DT is placed into Vx.
+                    printf("%04X: (%04X) LD V%X, DT\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
+                    printf("%04X: (%04X) LD V%X, K\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
+                    printf("%04X: (%04X) LD DT, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
+                    printf("%04X: (%04X) LD ST, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_ADD_INDEX: { // Fx1E - ADD I, Vx - Set I = I + Vx.  The values of I and Vx are added, and the results are stored in I.  
+                    printf("%04X: (%04X) ADD I, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_LD_DIGIT: { // Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.  The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx. See section 2.4, Display, for more information on the Chip-8 hexadecimal font.  
+                    printf("%04X: (%04X) LD F, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_LD_BIGDIGIT: { // FX30* - Point I to 10-byte font sprite for digit VX (0..9)
+                    printf("%04X: (%04X) LD BIGF, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_LD_BCD: { // Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.  The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
+                    printf("%04X: (%04X) LD B, V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_LD_IVX: { // Fx55 - LD [I], Vx - Store registers V0 through Vx in memory starting at location I.  The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.  
+                    printf("%04X: (%04X) LD [I], V%X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_LD_VXI: { // Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.  The interpreter reads values from memory starting at location I into registers V0 through Vx.
+                    printf("%04X: (%04X) LD V%X, [I]\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_STORE_RPL: {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+                case SPECIAL_LD_RPL: {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+                case SPECIAL_LD_I_16BIT: { // F000 NNNN
+                    printf("%04X: (%04X) LD I %04X\n", pc, instructionWord, wordAfter);
+                    break;
+                }
+                case SPECIAL_SET_PLANES: { // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
+                    printf("%04X: (%04X) PLANES %04X\n", pc, instructionWord, xArgument);
+                    break;
+                }
+                case SPECIAL_SET_AUDIO: { // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
+                    printf("%04X: (%04X) AUDIO\n", pc, instructionWord);
+                    break;
+                }
+                default : {
+                    printf("%04X: (%04X) ???\n", pc, instructionWord);
+                    break;
+                }
+            }
+            break;
+        }
+    }
+}
+
+
 std::vector<uint8_t> digitSprites = {
-    0xF0, 0x90, 0x90, 0x90, 0xF0,
-    0x20, 0x60, 0x20, 0x20, 0x70,
-    0xF0, 0x10, 0xF0, 0x80, 0xF0,
-    0xF0, 0x10, 0xF0, 0x10, 0xF0,
-    0x90, 0x90, 0xF0, 0x10, 0x10,
-    0xF0, 0x80, 0xF0, 0x10, 0xF0,
-    0xF0, 0x80, 0xF0, 0x90, 0xF0,
-    0xF0, 0x10, 0x20, 0x40, 0x40,
-    0xF0, 0x90, 0xF0, 0x90, 0xF0,
-    0xF0, 0x90, 0xF0, 0x10, 0xF0,
-    0xF0, 0x90, 0xF0, 0x90, 0x90,
-    0xE0, 0x90, 0xE0, 0x90, 0xE0,
-    0xF0, 0x80, 0x80, 0x80, 0xF0,
-    0xE0, 0x90, 0x90, 0x90, 0xE0,
-    0xF0, 0x80, 0xF0, 0x80, 0xF0,
-    0xF0, 0x80, 0xF0, 0x80, 0x80,
+#if 0
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+#else
+    0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+    0x20, 0x60, 0x20, 0x20, 0x70, // 1
+    0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+    0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+    0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+    0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+    0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+    0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+    0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+    0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+    0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+    0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+    0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+    0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+    0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+    0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+#endif
 };
 
 std::vector<uint8_t> largeDigitSprites = {
@@ -772,16 +1129,17 @@ struct Memory
         platform(platform)
     {
         for(size_t i = 0; i < digitSprites.size(); i++) {
-            write(0x200 - 80 + i, digitSprites[i]);
+            uint16_t address = i; //  0x200 - 80 + i
+            write(address, digitSprites[i]);
             if(i % 5 == 0) {
-                digitAddresses[i / 5] = 0x200 - 80 + i;
+                digitAddresses[i / 5] = address;
             }
         }
         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
             for(size_t i = 0; i < largeDigitSprites.size(); i++) {
                 write(0x200 - 80 - largeDigitSprites.size() + i, largeDigitSprites[i]);
                 if(i % 10 == 0) {
-                    largeDigitAddresses[i / 5] = 0x200 - 80 - largeDigitSprites.size() + i;
+                    largeDigitAddresses[i / 10] = 0x200 - 80 - largeDigitSprites.size() + i;
                 }
             }
         }
@@ -790,7 +1148,7 @@ struct Memory
     uint8_t read(uint16_t addr)
     {
         if(false)printf("read(%x) -> %x\n", addr, memory[addr]);
-        if((platform == CHIP8) || (platform == SCHIP_1_1)) {
+        if((platform != SCHIP_1_1) && (platform != XOCHIP)) {
             assert(addr < 4096);
         }
         return memory[addr];
@@ -798,7 +1156,7 @@ struct Memory
 
     void write(uint16_t addr, uint8_t v)
     {
-        if((platform == CHIP8) || (platform == SCHIP_1_1)) {
+        if((platform != SCHIP_1_1) && (platform != XOCHIP)) {
             assert(addr < 4096);
         }
         memory[addr] = v;
@@ -811,7 +1169,7 @@ struct Memory
 
     uint16_t getBigDigitLocation(uint8_t digit)
     {
-        if(!((platform == CHIP8) || (platform == SCHIP_1_1))) {
+        if((platform != SCHIP_1_1) && (platform != XOCHIP)) {
             abort();
         }
         assert(digit < 10);
@@ -939,9 +1297,9 @@ struct Interface
         return success && !closed;
     }
 
-    Interface()
+    Interface(const std::string& name)
     {
-        window = mfb_open_ex("CHIP8", windowWidth, windowHeight, WF_RESIZABLE);
+        window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
         if (window) {
             windowBuffer = new uint32_t[windowWidth * windowHeight];
             mfb_set_user_data(window, (void *) this);
@@ -955,6 +1313,7 @@ struct Interface
         colorTable[1] = {255, 255, 255};
         colorTable[2] = {170, 170, 170};
         colorTable[3] = {85, 85, 85};
+        clear();
     }
 
     void startSound()
@@ -971,21 +1330,26 @@ struct Interface
         return keyPressed[key];
     }
 
-    bool draw(uint8_t x, uint8_t y, bool newValue, uint8_t planeMask)
+    bool draw(uint8_t x, uint8_t y, uint8_t planeMask)
     {
         bool erased = false;
-        if((x <= 128) && (y < 64)) {
+
+        displayChanged = true; /* pixel will either be set or cleared... */
+
+        if((x < 128) && (y < 64)) {
+            auto& pixel = display.at(y).at(x);
+            auto oldValue = pixel;
             for(int i = 0; i < 2; i++) {
                 uint8_t bit = (0x1 << i);
                 if(planeMask & bit) {
-                    bool displayValue = (display.at(y).at(x) & bit);
-                    bool result = displayValue ^ newValue;
-                    displayChanged |= (displayValue != result);
-                    erased |= !result;
-                    display.at(y).at(x) = (display.at(y).at(x) & ~bit) | (result ? bit : 0);
+                    pixel = pixel ^ bit;
                 }
             }
+            if((oldValue != 0) && (pixel == 0)) {
+                erased = true;
+            }
         }
+
         return erased;
     }
 
@@ -1026,11 +1390,10 @@ int main(int argc, char **argv)
     argc -= 1;
     argv += 1;
 
-    Memory memory(CHIP8);
-    Interface interface;
     int ticksPerField = 7;
     ChipPlatform platform = CHIP8;
     uint32_t quirks = QUIRKS_NONE;
+    std::map<int,vec3ub> colorTable;
 
     while((argc > 0) && (argv[0][0] == '-')) {
 	if(strcmp(argv[0], "--color") == 0) {
@@ -1042,7 +1405,7 @@ int main(int argc, char **argv)
             int colorIndex = atoi(argv[1]);
             uint32_t colorName = strtoul(argv[2], nullptr, 16);
             vec3ub color = vec3ubFromInts((colorName >> 16) & 0xff, (colorName >> 8) & 0xff, colorName & 0xff);
-            interface.colorTable[colorIndex] = color;
+            colorTable[colorIndex] = color;
             argv += 3;
             argc -= 3;
         } else if(strcmp(argv[0], "--platform") == 0) {
@@ -1103,6 +1466,15 @@ int main(int argc, char **argv)
     if(argc < 1) {
         usage(progname);
         exit(EXIT_FAILURE);
+    }
+
+    char *base = strdup(argv[0]);
+    Interface interface(basename(base));
+    free(base);
+    Memory memory(platform);
+
+    for(const auto& [index, color] : colorTable) {
+        interface.colorTable[index] = color;
     }
 
     FILE *fp = fopen(argv[0], "rb");
