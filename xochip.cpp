@@ -1,3 +1,4 @@
+#include <unordered_map>
 #include <map>
 #include <string>
 #include <array>
@@ -12,7 +13,15 @@
 
 #include <MiniFB.h>
 
-constexpr bool debug = false;
+constexpr int DEBUG_STATE = 0x01;
+constexpr int DEBUG_ASM = 0x02;
+constexpr int DEBUG_DRAW = 0x04;
+std::unordered_map<std::string, int> keywordsToDebugFlags = {
+    {"state", DEBUG_STATE},
+    {"asm", DEBUG_ASM},
+    {"draw", DEBUG_DRAW},
+};
+int debug = 0;
 
 constexpr uint32_t QUIRKS_NONE = 0x00;
 constexpr uint32_t QUIRKS_SHIFT = 0x01;           /* shift VX instead of VY */
@@ -200,18 +209,23 @@ struct Chip8Interpreter
             }
         }
 
-        if(debug) {
+        if(debug & DEBUG_STATE) {
             printf("CHIP8: clk:%llu pc:%04X I:%04X ", clock++, pc, I);
             for(int i = 0; i < 16; i++) {
                 printf("%02X ", registers[i]);
             }
             puts("");
+        }
+
+        if(debug & DEBUG_ASM) {
             uint8_t hiByte = memory.read(pc);
             uint8_t loByte = memory.read(pc + 1);
             uint16_t wordAfter = hiByte * 256 + loByte;
             disassemble(pc, instructionWord, wordAfter);
+        }
 
-            if(clock >= 43757) {
+        if(false) {
+            if(false && (clock >= 43757)) {
                 for(int row = 0; row < 32; row++) {
                     for(int col = 0; col < 64; col++) {
                         printf("%c", interface.display.at(row * 2).at(col * 2) ? '#' : '.');
@@ -419,34 +433,39 @@ struct Chip8Interpreter
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
                         uint16_t result16 = registers[xArgument] + registers[yArgument];
-                        registers[0xF] = (result16 > 255) ? 1 : 0;
+                        bool flag = result16 > 0xFF;
                         registers[xArgument] = registers[xArgument] + registers[yArgument];
+                        registers[0xF] = flag ? 1 : 0;
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        registers[0xF] = (registers[xArgument] >= registers[yArgument]) ? 1 : 0;
+                        bool flag = registers[xArgument] > registers[yArgument];
                         registers[xArgument] = registers[xArgument] - registers[yArgument];
+                        registers[0xF] = flag ? 1 : 0;
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        registers[0xF] = (registers[yArgument] >= registers[xArgument]) ? 1 : 0;
+                        bool flag = registers[yArgument] > registers[xArgument];
                         registers[xArgument] = registers[yArgument] - registers[xArgument];
+                        registers[0xF] = flag ? 1 : 0;
                         break;
                     }
                     case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
-                        registers[0xF] = registers[yArgument] & 0x1;
+                        bool flag = registers[yArgument] & 0x1;
                         registers[xArgument] = registers[yArgument] / 2;
+                        registers[0xF] = flag ? 1 : 0;
                         break;
                     }
                     case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
-                        registers[0xF] = (registers[yArgument] >> 7) & 0x1;
+                        bool flag = registers[yArgument] & 0x80;
                         registers[xArgument] = registers[yArgument] * 2;
+                        registers[0xF] = flag ? 1 : 0;
                         break;
                     }
                     default : {
@@ -531,7 +550,7 @@ struct Chip8Interpreter
                                         uint32_t clipX = x % screenWidth;
                                         uint32_t clipY = y + x / screenWidth;
                                         bool oneErased = false;
-                                        if(debug) {
+                                        if(debug & DEBUG_DRAW) {
                                             printf("draw %d %d (%d %d) (%d)\n", x, y, clipX, clipY, clipX + clipY * 64);
                                         }
                                         if(clipY < screenHeight) {
@@ -543,7 +562,7 @@ struct Chip8Interpreter
                                         } else {
                                             oneErased |= true;
                                         }
-                                        if(oneErased && debug) {
+                                        if(oneErased && (debug & DEBUG_DRAW)) {
                                             printf("set VF\n");
                                         }
                                         erased += oneErased ? 1 : 0;
@@ -702,7 +721,6 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
-                        pc += 2;
                         break;
                     }
                     case SPECIAL_SET_AUDIO: { // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
@@ -712,7 +730,6 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
-                        pc += 2;
                         break;
                     }
                     default : {
@@ -1270,6 +1287,7 @@ struct Interface
             case KB_KEY_F: keyPressed[0xE] = isPressed; break;
             case KB_KEY_Z: keyPressed[0xA] = isPressed; break;
             case KB_KEY_X: keyPressed[0x0] = isPressed; break;
+            case KB_KEY_SPACE: keyPressed[0x0] = isPressed; break;
             case KB_KEY_C: keyPressed[0xB] = isPressed; break;
             case KB_KEY_V: keyPressed[0xF] = isPressed; break;
             default: /* pass */ break;
@@ -1438,6 +1456,22 @@ int main(int argc, char **argv)
                 exit(EXIT_FAILURE);
             }
             quirks |= keywordsToQuirkValues.at(quirkKeyword);
+            argv += 2;
+            argc -= 2;
+        } else if(strcmp(argv[0], "--debug") == 0) {
+            if(argc < 2) {
+                fprintf(stderr, "--debug option requires a debug flag to enable.\n");
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            std::string debugKeyword = argv[1];
+            if(keywordsToDebugFlags.count(debugKeyword) == 0) {
+                fprintf(stderr, "unknown debug flag \"%s\".\n", argv[1]);
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            debug |= keywordsToDebugFlags.at(debugKeyword);
+            fprintf(stderr, "debug value now 0x%02X\n", debug);
             argv += 2;
             argc -= 2;
         } else if(strcmp(argv[0], "--rate") == 0) {
