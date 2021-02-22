@@ -16,10 +16,12 @@
 constexpr int DEBUG_STATE = 0x01;
 constexpr int DEBUG_ASM = 0x02;
 constexpr int DEBUG_DRAW = 0x04;
+constexpr int DEBUG_FAIL_UNSUPPORTED_INSN = 0x08;
 std::unordered_map<std::string, int> keywordsToDebugFlags = {
     {"state", DEBUG_STATE},
     {"asm", DEBUG_ASM},
     {"draw", DEBUG_DRAW},
+    {"insn", DEBUG_FAIL_UNSUPPORTED_INSN},
 };
 int debug = 0;
 
@@ -332,8 +334,8 @@ struct Chip8Interpreter
             case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
                 if(registers[xArgument] == imm8Argument) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc);
-                        uint8_t loByte = memory.read(pc + 1);
+                        uint8_t hiByte = memory.read(pc + 2);
+                        uint8_t loByte = memory.read(pc + 3);
                         uint16_t instructionWord = hiByte * 256 + loByte;
                         if(instructionWord == 0xF000) {
                             pc += 2;
@@ -347,8 +349,8 @@ struct Chip8Interpreter
             case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
                 if(registers[xArgument] != imm8Argument) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc);
-                        uint8_t loByte = memory.read(pc + 1);
+                        uint8_t hiByte = memory.read(pc + 2);
+                        uint8_t loByte = memory.read(pc + 3);
                         uint16_t instructionWord = hiByte * 256 + loByte;
                         if(instructionWord == 0xF000) {
                             pc += 2;
@@ -364,24 +366,38 @@ struct Chip8Interpreter
                 switch(opcode) {
                     case HIGH5_LD_I_VXVY : { // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
                         if(platform == XOCHIP) {
-                            for(int i = xArgument; i <= yArgument; i++) {
-                                memory.write(I + i - xArgument, registers[i]);
+                            if(xArgument < yArgument) {
+                                for(int i = 0; i <= yArgument - xArgument; i++) {
+                                    memory.write(I + i, registers[xArgument + i]);
+                                }
+                            } else {
+                                for(int i = 0; i <= xArgument - yArgument; i++) {
+                                    memory.write(I + i, registers[xArgument - i]);
+                                }
                             }
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
+                        pc += 2;
                         break;
                     }
                     case HIGH5_LD_VXVY_I : { // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
                         if(platform == XOCHIP) {
-                            for(int i = xArgument; i <= yArgument; i++) {
-                                registers[i] = memory.read(I + i - xArgument);
+                            if(xArgument < yArgument) {
+                                for(int i = 0; i <= yArgument - xArgument; i++) {
+                                    registers[xArgument + i] = memory.read(I + i);
+                                }
+                            } else {
+                                for(int i = 0; i <= xArgument - yArgument; i++) {
+                                    registers[xArgument - i] = memory.read(I + i);
+                                }
                             }
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
+                        pc += 2;
                         break;
                     }
                     case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
@@ -421,14 +437,17 @@ struct Chip8Interpreter
                     }
                     case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
                         registers[xArgument] |= registers[yArgument];
+                        // XXX logicQuirk registers[0xF] = 0;
                         break;
                     }
                     case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
                         registers[xArgument] &= registers[yArgument];
+                        // XXX logicQuirk registers[0xF] = 0;
                         break;
                     }
                     case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
                         registers[xArgument] ^= registers[yArgument];
+                        // XXX logicQuirk registers[0xF] = 0;
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
@@ -436,18 +455,21 @@ struct Chip8Interpreter
                         bool flag = result16 > 0xFF;
                         registers[xArgument] = registers[xArgument] + registers[yArgument];
                         registers[0xF] = flag ? 1 : 0;
+                        // XXX vfOrderQuirk
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
                         bool flag = registers[xArgument] > registers[yArgument];
                         registers[xArgument] = registers[xArgument] - registers[yArgument];
                         registers[0xF] = flag ? 1 : 0;
+                        // XXX vfOrderQuirk
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
                         bool flag = registers[yArgument] > registers[xArgument];
                         registers[xArgument] = registers[yArgument] - registers[xArgument];
                         registers[0xF] = flag ? 1 : 0;
+                        // XXX vfOrderQuirk
                         break;
                     }
                     case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
@@ -457,6 +479,7 @@ struct Chip8Interpreter
                         bool flag = registers[yArgument] & 0x1;
                         registers[xArgument] = registers[yArgument] / 2;
                         registers[0xF] = flag ? 1 : 0;
+                        // XXX vfOrderQuirk
                         break;
                     }
                     case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
@@ -466,6 +489,7 @@ struct Chip8Interpreter
                         bool flag = registers[yArgument] & 0x80;
                         registers[xArgument] = registers[yArgument] * 2;
                         registers[0xF] = flag ? 1 : 0;
+                        // XXX vfOrderQuirk
                         break;
                     }
                     default : {
@@ -484,8 +508,8 @@ struct Chip8Interpreter
                 }
                 if(registers[xArgument] != registers[yArgument]) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc);
-                        uint8_t loByte = memory.read(pc + 1);
+                        uint8_t hiByte = memory.read(pc + 2);
+                        uint8_t loByte = memory.read(pc + 3);
                         uint16_t instructionWord = hiByte * 256 + loByte;
                         if(instructionWord == 0xF000) {
                             pc += 2;
@@ -592,10 +616,11 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                 int opcode = instructionWord & 0xFF;
                 switch(opcode) {
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
-                        if(interface.pressed(xArgument)) {
+                        if(interface.pressed(registers[xArgument])) {
+                            printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
                             if(platform == XOCHIP) {
-                                uint8_t hiByte = memory.read(pc);
-                                uint8_t loByte = memory.read(pc + 1);
+                                uint8_t hiByte = memory.read(pc + 2);
+                                uint8_t loByte = memory.read(pc + 3);
                                 uint16_t instructionWord = hiByte * 256 + loByte;
                                 if(instructionWord == 0xF000) {
                                     pc += 2;
@@ -606,16 +631,18 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
-                        if(!interface.pressed(xArgument)) {
+                        if(!interface.pressed(registers[xArgument])) {
                             if(platform == XOCHIP) {
-                                uint8_t hiByte = memory.read(pc);
-                                uint8_t loByte = memory.read(pc + 1);
+                                uint8_t hiByte = memory.read(pc + 2);
+                                uint8_t loByte = memory.read(pc + 3);
                                 uint16_t instructionWord = hiByte * 256 + loByte;
                                 if(instructionWord == 0xF000) {
                                     pc += 2;
                                 }
                             }
                             pc += 2;
+                        } else {
+                            printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
                         }
                         break;
                     }
@@ -1219,14 +1246,16 @@ struct Interface
 
     void scroll(int dx, int dy)
     {
+        static std::array<std::array<uint8_t, 128>, 64> display2;
+        display2 = display; // XXX do something better for production
         for(int y = 0; y < 64; y++) {
             int srcy = y + dy;
-            if((srcy >= 0) && (srcy < 64)) {
-                for(int x = 0; x < 128; x++) {
-                    int srcx = x + dx;
-                    if((srcx >= 0) && (srcx < 128)) {
-                        display.at(y).at(x) = display.at(srcy).at(srcx);
-                    }
+            for(int x = 0; x < 128; x++) {
+                int srcx = x + dx;
+                if((srcx >= 0) && (srcx < 128) && (srcy >= 0) && (srcy < 64)) {
+                    display.at(y).at(x) = display2.at(srcy).at(srcx);
+                } else {
+                    display.at(y).at(x) = 0;
                 }
             }
         }
@@ -1531,7 +1560,11 @@ int main(int argc, char **argv)
     while(!done) {
 
         for(int i = 0; i < ticksPerField; i++) {
-            chip8.step(memory, interface);
+            Chip8Interpreter<Memory,Interface>::StepResult result = chip8.step(memory, interface);
+            if((result == Chip8Interpreter<Memory,Interface>::UNSUPPORTED_INSTRUCTION) && (debug & DEBUG_FAIL_UNSUPPORTED_INSN)) {
+                printf("exit on unsupported instruction\n");
+                exit(EXIT_FAILURE);
+            }
         }
 
         float dt;
