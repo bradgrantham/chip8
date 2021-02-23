@@ -8,8 +8,15 @@
 #include <cstdlib>
 #include <cassert>
 #include <cstring>
-#include <sys/time.h>
+#include <chrono>
+#include <random>
+
+#ifdef __APPLE__
+#define XCODE_MISSING_FILESYSTEM_FOR_YEARS
 #include <libgen.h>
+#else
+#include <filesystem>
+#endif
 
 #include <MiniFB.h>
 
@@ -17,11 +24,13 @@ constexpr int DEBUG_STATE = 0x01;
 constexpr int DEBUG_ASM = 0x02;
 constexpr int DEBUG_DRAW = 0x04;
 constexpr int DEBUG_FAIL_UNSUPPORTED_INSN = 0x08;
+constexpr int DEBUG_KEYS = 0x10;
 std::unordered_map<std::string, int> keywordsToDebugFlags = {
     {"state", DEBUG_STATE},
     {"asm", DEBUG_ASM},
     {"draw", DEBUG_DRAW},
     {"insn", DEBUG_FAIL_UNSUPPORTED_INSN},
+    {"keys", DEBUG_KEYS},
 };
 int debug = 0;
 
@@ -52,20 +61,26 @@ struct Chip8Interpreter
     std::vector<uint16_t> stack;
     uint16_t I = 0;
     uint16_t pc = 0;
-    uint16_t DT = 0;
-    uint16_t ST = 0;
+    uint8_t DT = 0;
+    uint8_t ST = 0;
     bool extendedScreenMode = false;
     uint32_t screenPlaneMask = 0x1;
+
+    std::random_device r;
+    std::default_random_engine e1;
+    std::uniform_int_distribution<int> uniform_dist;
 
     bool waitingForKeyPress = false;
     bool waitingForKeyRelease = false;
     uint8_t keyPressed;
-    uint8_t keyDestinationRegister;
+    int keyDestinationRegister;
 
     Chip8Interpreter(uint16_t initialPC, ChipPlatform platform, uint32_t quirks) :
         platform(platform),
         quirks(quirks),
-        pc(initialPC)
+        pc(initialPC),
+        e1(r()),
+        uniform_dist(0, 255)
     {
     }
 
@@ -190,7 +205,9 @@ struct Chip8Interpreter
             }
 
             if(isPressed) {
-                printf("pressed %d now wait for release\n", whichKey);
+                if(debug & DEBUG_KEYS) {
+                    printf("pressed %d now wait for release\n", whichKey);
+                }
                 keyPressed = whichKey;
                 waitingForKeyPress = false;
                 waitingForKeyRelease = true;
@@ -203,7 +220,9 @@ struct Chip8Interpreter
             bool wasReleased = !interface.pressed(keyPressed);
 
             if(wasReleased) {
-                printf("key wait over\n");
+                if(debug & DEBUG_KEYS) {
+                    printf("key wait over\n");
+                }
                 waitingForKeyRelease = false;
                 registers[keyDestinationRegister] = keyPressed;
             } else {
@@ -459,14 +478,14 @@ struct Chip8Interpreter
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        bool flag = registers[xArgument] > registers[yArgument];
+                        bool flag = registers[xArgument] >= registers[yArgument];
                         registers[xArgument] = registers[xArgument] - registers[yArgument];
                         registers[0xF] = flag ? 1 : 0;
                         // XXX vfOrderQuirk
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        bool flag = registers[yArgument] > registers[xArgument];
+                        bool flag = registers[yArgument] >= registers[xArgument];
                         registers[xArgument] = registers[yArgument] - registers[xArgument];
                         registers[0xF] = flag ? 1 : 0;
                         // XXX vfOrderQuirk
@@ -534,7 +553,7 @@ struct Chip8Interpreter
                 break;
             }
             case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
-                registers[xArgument] = random() & 0xFF & imm8Argument;
+                registers[xArgument] = uniform_dist(e1) & imm8Argument;
                 pc += 2;
                 break;
             }
@@ -548,12 +567,12 @@ struct Chip8Interpreter
                 // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
                 // Display, for more information on the Chip-8 screen and sprites.
                 int erased = 0;
-                int screenWidth = extendedScreenMode ? 128 : 64;
-                int screenHeight = extendedScreenMode ? 64 : 32;
-                int pixelScale = extendedScreenMode ? 1 : 2;
+                uint32_t screenWidth = extendedScreenMode ? 128 : 64;
+                uint32_t screenHeight = extendedScreenMode ? 64 : 32;
+                uint32_t pixelScale = extendedScreenMode ? 1 : 2;
                 uint16_t spriteByteAddress = I;
-                int byteCount = 1;
-                int rowCount = imm4Argument;
+                uint32_t byteCount = 1;
+                uint32_t rowCount = imm4Argument;
                 if(extendedScreenMode && (imm4Argument == 0)) {
                     rowCount = 16;
                     byteCount = 2;
@@ -563,7 +582,7 @@ struct Chip8Interpreter
                     uint8_t planeMask = 1 << bitplane;
                     if(screenPlaneMask & planeMask) {
                         for(uint32_t rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            for(int byteIndex = 0; byteIndex < byteCount; byteIndex++) {
+                            for(uint32_t byteIndex = 0; byteIndex < byteCount; byteIndex++) {
                                 uint8_t byte = memory.read(spriteByteAddress);
                                 spriteByteAddress++;
                                 for(uint32_t bitIndex = 0; bitIndex < 8; bitIndex++) {
@@ -578,8 +597,8 @@ struct Chip8Interpreter
                                             printf("draw %d %d (%d %d) (%d)\n", x, y, clipX, clipY, clipX + clipY * 64);
                                         }
                                         if(clipY < screenHeight) {
-                                            for(int ygrid = 0; ygrid < pixelScale; ygrid++) {
-                                                for(int xgrid = 0; xgrid < pixelScale; xgrid++) {
+                                            for(uint32_t ygrid = 0; ygrid < pixelScale; ygrid++) {
+                                                for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
                                                     oneErased |= interface.draw(clipX * pixelScale + xgrid, clipY * pixelScale + ygrid, planeMask);
                                                 }
                                             }
@@ -598,18 +617,6 @@ struct Chip8Interpreter
                 }
                 registers[0xF] = (erased > 0) ? 1 : 0;
                 pc += 2;
-#if 0
-DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
-    If N=0 and extended mode, show 16x16 sprite.
-    for each enabled  planes, show sprite
-    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-        handle case of N=0 and extended mode
-    }
-    if(quirks & QUIRK_CLIP and extended mode) {
-        set VF to number of collided rows
-        dont draw wrapped, add clipped bottom rows to VF
-    }
-#endif
                 break;
             }
             case INSN_SKP: {
@@ -617,7 +624,9 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                 switch(opcode) {
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
                         if(interface.pressed(registers[xArgument])) {
-                            printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                            if(debug & DEBUG_KEYS) {
+                                printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                            }
                             if(platform == XOCHIP) {
                                 uint8_t hiByte = memory.read(pc + 2);
                                 uint8_t loByte = memory.read(pc + 3);
@@ -642,7 +651,9 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                             }
                             pc += 2;
                         } else {
-                            printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                            if(debug & DEBUG_KEYS) {
+                                printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                            }
                         }
                         break;
                     }
@@ -663,7 +674,9 @@ DXYN*    Show N-byte sprite from M(I) at coords (VX,VY), VF := collision.
                         break;
                     }
                     case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
-                        printf("waiting for key\n");
+                        if(debug & DEBUG_KEYS) {
+                            printf("waiting for key\n");
+                        }
                         waitingForKeyPress = true;
                         keyDestinationRegister = xArgument;
                         break;
@@ -1172,7 +1185,7 @@ struct Memory
     Memory(ChipPlatform platform) :
         platform(platform)
     {
-        for(size_t i = 0; i < digitSprites.size(); i++) {
+        for(uint16_t i = 0; i < digitSprites.size(); i++) {
             uint16_t address = i; //  0x200 - 80 + i
             write(address, digitSprites[i]);
             if(i % 5 == 0) {
@@ -1180,10 +1193,11 @@ struct Memory
             }
         }
         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-            for(size_t i = 0; i < largeDigitSprites.size(); i++) {
-                write(0x200 - 80 - largeDigitSprites.size() + i, largeDigitSprites[i]);
+            for(uint16_t i = 0; i < largeDigitSprites.size(); i++) {
+                uint16_t address = 0x200 - 80 - (uint16_t)largeDigitSprites.size() + i;
+                write(address, largeDigitSprites[i]);
                 if(i % 10 == 0) {
-                    largeDigitAddresses[i / 10] = 0x200 - 80 - largeDigitSprites.size() + i;
+                    largeDigitAddresses[i / 10] = address;
                 }
             }
         }
@@ -1309,6 +1323,7 @@ struct Interface
             case KB_KEY_Q: keyPressed[0x4] = isPressed; break;
             case KB_KEY_W: keyPressed[0x5] = isPressed; break;
             case KB_KEY_E: keyPressed[0x6] = isPressed; break;
+            case KB_KEY_SPACE: keyPressed[0x6] = isPressed; break;
             case KB_KEY_R: keyPressed[0xD] = isPressed; break;
             case KB_KEY_A: keyPressed[0x7] = isPressed; break;
             case KB_KEY_S: keyPressed[0x8] = isPressed; break;
@@ -1316,7 +1331,6 @@ struct Interface
             case KB_KEY_F: keyPressed[0xE] = isPressed; break;
             case KB_KEY_Z: keyPressed[0xA] = isPressed; break;
             case KB_KEY_X: keyPressed[0x0] = isPressed; break;
-            case KB_KEY_SPACE: keyPressed[0x0] = isPressed; break;
             case KB_KEY_C: keyPressed[0xB] = isPressed; break;
             case KB_KEY_V: keyPressed[0xF] = isPressed; break;
             default: /* pass */ break;
@@ -1346,6 +1360,7 @@ struct Interface
 
     Interface(const std::string& name)
     {
+        keyPressed.fill(false);
         window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
         if (window) {
             windowBuffer = new uint32_t[windowWidth * windowHeight];
@@ -1354,8 +1369,7 @@ struct Interface
             mfb_set_keyboard_callback(window, keyboardcb);
             succeeded = true;
         }
-        vec3ub black = {0,0,0};
-        std::fill(colorTable.begin(), colorTable.end(), black);
+        colorTable.fill({0,0,0});
         colorTable[0] = {0, 0, 0};
         colorTable[1] = {255, 255, 255};
         colorTable[2] = {170, 170, 170};
@@ -1365,7 +1379,7 @@ struct Interface
 
     void startSound()
     {
-        printf("beep\n");
+        printf("sound\n");
     }
 
     void stopSound()
@@ -1531,9 +1545,14 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+#ifdef XCODE_MISSING_FILESYSTEM_FOR_YEARS
     char *base = strdup(argv[0]);
     Interface interface(basename(base));
     free(base);
+#else
+    std::filesystem::path base(argv[0]);
+    Interface interface(base.filename().string());
+#endif
     Memory memory(platform);
 
     for(const auto& [index, color] : colorTable) {
@@ -1544,7 +1563,7 @@ int main(int argc, char **argv)
     fseek(fp, 0, SEEK_END);
     long size = ftell(fp);
     fseek(fp, 0, SEEK_SET);
-    for(long i = 0; i < size; i++) {
+    for(uint16_t i = 0; i < size; i++) {
         uint8_t byte;
         fread(&byte, 1, 1, fp);
         memory.write(0x200 + i, byte);
@@ -1553,8 +1572,7 @@ int main(int argc, char **argv)
 
     Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks);
 
-    struct timeval interfaceThen, interfaceNow;
-    gettimeofday(&interfaceThen, nullptr);
+    std::chrono::time_point<std::chrono::system_clock> interfaceThen = std::chrono::system_clock::now();
 
     bool done = false;
     while(!done) {
@@ -1567,10 +1585,12 @@ int main(int argc, char **argv)
             }
         }
 
+        std::chrono::time_point<std::chrono::system_clock> interfaceNow;
         float dt;
         do { 
-            gettimeofday(&interfaceNow, nullptr);
-            dt = interfaceNow.tv_sec + interfaceNow.tv_usec / 1000000.0 - (interfaceThen.tv_sec + interfaceThen.tv_usec / 1000000.0);
+            interfaceNow = std::chrono::system_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(interfaceNow - interfaceThen);
+            dt = elapsed.count();
         } while(dt < .0166f);
 
         done = !interface.iterate();
