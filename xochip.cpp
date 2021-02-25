@@ -179,12 +179,17 @@ struct Chip8Interpreter
         UNSUPPORTED_INSTRUCTION,
     };
 
+    uint16_t readU16(MEMORY& memory, uint16_t addr)
+    {
+        uint8_t hiByte = memory.read(addr);
+        uint8_t loByte = memory.read(addr + 1);
+        return hiByte * 256 + loByte;
+    }
+
     StepResult step(MEMORY& memory, INTERFACE& interface)
     {
         StepResult stepResult = CONTINUE;
-        uint8_t hiByte = memory.read(pc);
-        uint8_t loByte = memory.read(pc + 1);
-        uint16_t instructionWord = hiByte * 256 + loByte;
+        uint16_t instructionWord = readU16(memory, pc);
         uint8_t imm8Argument = instructionWord & 0x00FF;
         uint8_t imm4Argument = instructionWord & 0x000F;
         uint16_t imm12Argument = instructionWord & 0x0FFF;
@@ -239,9 +244,7 @@ struct Chip8Interpreter
         }
 
         if(debug & DEBUG_ASM) {
-            uint8_t hiByte = memory.read(pc);
-            uint8_t loByte = memory.read(pc + 1);
-            uint16_t wordAfter = hiByte * 256 + loByte;
+            uint16_t wordAfter = readU16(memory, pc + 2);
             disassemble(pc, instructionWord, wordAfter);
         }
 
@@ -353,9 +356,7 @@ struct Chip8Interpreter
             case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
                 if(registers[xArgument] == imm8Argument) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc + 2);
-                        uint8_t loByte = memory.read(pc + 3);
-                        uint16_t instructionWord = hiByte * 256 + loByte;
+                        uint16_t instructionWord = readU16(memory, pc + 2);
                         if(instructionWord == 0xF000) {
                             pc += 2;
                         }
@@ -368,9 +369,7 @@ struct Chip8Interpreter
             case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
                 if(registers[xArgument] != imm8Argument) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc + 2);
-                        uint8_t loByte = memory.read(pc + 3);
-                        uint16_t instructionWord = hiByte * 256 + loByte;
+                        uint16_t instructionWord = readU16(memory, pc + 2);
                         if(instructionWord == 0xF000) {
                             pc += 2;
                         }
@@ -470,7 +469,7 @@ struct Chip8Interpreter
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
-                        uint16_t result16 = registers[xArgument] + registers[yArgument];
+                        uint16_t result16 = registers[xArgument] + registers[yArgument]; // XXX collapse into line below
                         bool flag = result16 > 0xFF;
                         registers[xArgument] = registers[xArgument] + registers[yArgument];
                         registers[0xF] = flag ? 1 : 0;
@@ -527,9 +526,7 @@ struct Chip8Interpreter
                 }
                 if(registers[xArgument] != registers[yArgument]) {
                     if(platform == XOCHIP) {
-                        uint8_t hiByte = memory.read(pc + 2);
-                        uint8_t loByte = memory.read(pc + 3);
-                        uint16_t instructionWord = hiByte * 256 + loByte;
+                        uint16_t instructionWord = readU16(memory, pc + 2);
                         if(instructionWord == 0xF000) {
                             pc += 2;
                         }
@@ -628,9 +625,7 @@ struct Chip8Interpreter
                                 printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
                             }
                             if(platform == XOCHIP) {
-                                uint8_t hiByte = memory.read(pc + 2);
-                                uint8_t loByte = memory.read(pc + 3);
-                                uint16_t instructionWord = hiByte * 256 + loByte;
+                                uint16_t instructionWord = readU16(memory, pc + 2);
                                 if(instructionWord == 0xF000) {
                                     pc += 2;
                                 }
@@ -642,9 +637,7 @@ struct Chip8Interpreter
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
                         if(!interface.pressed(registers[xArgument])) {
                             if(platform == XOCHIP) {
-                                uint8_t hiByte = memory.read(pc + 2);
-                                uint8_t loByte = memory.read(pc + 3);
-                                uint16_t instructionWord = hiByte * 256 + loByte;
+                                uint16_t instructionWord = readU16(memory, pc + 2);
                                 if(instructionWord == 0xF000) {
                                     pc += 2;
                                 }
@@ -744,9 +737,7 @@ struct Chip8Interpreter
                     }
                     case SPECIAL_LD_I_16BIT: { // F000 NNNN
                         if(platform == XOCHIP) {
-                            uint8_t hiImm16 = memory.read(pc + 2);
-                            uint8_t loImm16 = memory.read(pc + 3);
-                            I = hiImm16 * 256 + loImm16;
+                            I = readU16(memory, pc + 2);
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" features?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
