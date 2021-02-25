@@ -186,6 +186,19 @@ struct Chip8Interpreter
         return hiByte * 256 + loByte;
     }
 
+    int getInstructionSize(MEMORY& memory, uint16_t addr)
+    {
+        if(platform == XOCHIP) {
+            if(readU16(memory, addr) == 0xF000) {
+                return 4;
+            } else {
+                return 2;
+            }
+        } else {
+            return 2;
+        }
+    }
+
     StepResult step(MEMORY& memory, INTERFACE& interface)
     {
         StepResult stepResult = CONTINUE;
@@ -259,6 +272,8 @@ struct Chip8Interpreter
             }
         }
 
+        uint16_t nextPC = pc + getInstructionSize(memory, pc);
+
         switch(highNybble) {
             case INSN_SYS: {
                 uint16_t sysOpcode = instructionWord & 0xFFF;
@@ -268,7 +283,7 @@ struct Chip8Interpreter
                         break;
                     }
                     case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
-                        pc = stack.back();
+                        nextPC = stack.back();
                         stack.pop_back();
                         break;
                     }
@@ -276,7 +291,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             interface.scroll(-4, 0);
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL RIGHT 4) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL RIGHT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -285,7 +300,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             interface.scroll(4, 0);
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL ELFT 4) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL ELFT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -294,7 +309,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             stepResult = EXIT_INTERPRETER;
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXIT) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXIT) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -303,7 +318,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = true;
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXTENDEDSCREEN) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXTENDEDSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -312,7 +327,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = false;
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (ORIGINALSCREEN) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (ORIGINALSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -323,7 +338,7 @@ struct Chip8Interpreter
                             if(platform == XOCHIP) {
                                 interface.scroll(0, imm4Argument);
                             } else {
-                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL UP) - does this ROM require \"xochip\" features?\n", instructionWord);
+                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL UP) - does this ROM require \"xochip\" platform?\n", instructionWord);
                                 stepResult = UNSUPPORTED_INSTRUCTION;
                             }
                         } else if((sysOpcode & 0xFF0) == SYS_SCROLL_DOWN) {
@@ -331,7 +346,7 @@ struct Chip8Interpreter
                             if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                                 interface.scroll(0, -imm4Argument);
                             } else {
-                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL DOWN) - does this ROM require \"schip\" features?\n", instructionWord);
+                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL DOWN) - does this ROM require \"schip\" platform?\n", instructionWord);
                                 stepResult = UNSUPPORTED_INSTRUCTION;
                             }
                         } else {
@@ -341,42 +356,27 @@ struct Chip8Interpreter
                         break;
                     }
                 }
-                pc += 2;
                 break;
             }
             case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
-                pc = imm12Argument;
+                nextPC = imm12Argument;
                 break;
             }
             case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
-                stack.push_back(pc);
-                pc = imm12Argument;
+                stack.push_back(nextPC);
+                nextPC = imm12Argument;
                 break;
             }
             case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
                 if(registers[xArgument] == imm8Argument) {
-                    if(platform == XOCHIP) {
-                        uint16_t instructionWord = readU16(memory, pc + 2);
-                        if(instructionWord == 0xF000) {
-                            pc += 2;
-                        }
-                    }
-                    pc += 2;
+                    nextPC = nextPC + getInstructionSize(memory, nextPC);
                 }
-                pc += 2;
                 break;
             }
             case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
                 if(registers[xArgument] != imm8Argument) {
-                    if(platform == XOCHIP) {
-                        uint16_t instructionWord = readU16(memory, pc + 2);
-                        if(instructionWord == 0xF000) {
-                            pc += 2;
-                        }
-                    }
-                    pc += 2;
+                    nextPC = nextPC + getInstructionSize(memory, nextPC);
                 }
-                pc += 2;
                 break;
             }
             case INSN_HIGH5: {
@@ -394,10 +394,9 @@ struct Chip8Interpreter
                                 }
                             }
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
-                        pc += 2;
                         break;
                     }
                     case HIGH5_LD_VXVY_I : { // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
@@ -412,23 +411,14 @@ struct Chip8Interpreter
                                 }
                             }
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
-                        pc += 2;
                         break;
                     }
                     case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
                         if(registers[xArgument] == registers[yArgument]) {
-                            pc += 4;
-                            if(platform == XOCHIP) {
-                                uint16_t instructionWord = readU16(memory, pc + 2);
-                                if(instructionWord == 0xF000) {
-                                    pc += 2;
-                                }
-                            }
-                        } else {
-                            pc += 2;
+                            nextPC = nextPC + getInstructionSize(memory, nextPC);
                         }
                         break;
                     }
@@ -444,12 +434,10 @@ struct Chip8Interpreter
             }
             case INSN_LD_IMM: { // 6xkk - LD Vx, byte - Set Vx = kk.  The interpreter puts the value kk into register Vx.  
                 registers[xArgument] = imm8Argument;
-                pc += 2;
                 break;
             }
             case INSN_ADD_IMM: { // 7xkk - ADD Vx, byte - Set Vx = Vx + kk.  Adds the value kk to the value of register Vx, then stores the result in Vx.
                 registers[xArgument] = registers[xArgument] + imm8Argument;
-                pc += 2;
                 break;
             }
             case INSN_ALU: {
@@ -522,7 +510,6 @@ struct Chip8Interpreter
                         break;
                     }
                 }
-                pc += 2;
                 break;
             }
             case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
@@ -531,33 +518,24 @@ struct Chip8Interpreter
                     stepResult = UNSUPPORTED_INSTRUCTION;
                 }
                 if(registers[xArgument] != registers[yArgument]) {
-                    if(platform == XOCHIP) {
-                        uint16_t instructionWord = readU16(memory, pc + 2);
-                        if(instructionWord == 0xF000) {
-                            pc += 2;
-                        }
-                    }
-                    pc += 2;
+                    nextPC = nextPC + getInstructionSize(memory, nextPC);
                 }
-                pc += 2;
                 break;
             }
             case INSN_LD_I: { // Annn - LD I, addr - Set I = nnn.  
                 I = imm12Argument;
-                pc += 2;
                 break;
             }
             case INSN_JP_V0: { // Bnnn - JP V0, addr - Jump to location nnn + V0.
                 if(quirks & QUIRKS_JUMP) { // Ugh!
-                    pc = (imm12Argument & 0xFF) + registers[xArgument] + (xArgument << 8);
+                    nextPC = (imm12Argument & 0xFF) + registers[xArgument] + (xArgument << 8);
                 } else {
-                    pc = imm12Argument + registers[0];
+                    nextPC = imm12Argument + registers[0];
                 }
                 break;
             }
             case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
                 registers[xArgument] = uniform_dist(e1) & imm8Argument;
-                pc += 2;
                 break;
             }
             case INSN_DRW: { // Dxyn - DRW Vx, Vy, nibble
@@ -619,7 +597,6 @@ struct Chip8Interpreter
                     }
                 }
                 registers[0xF] = (erased > 0) ? 1 : 0;
-                pc += 2;
                 break;
             }
             case INSN_SKP: {
@@ -630,25 +607,13 @@ struct Chip8Interpreter
                             if(debug & DEBUG_KEYS) {
                                 printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
                             }
-                            if(platform == XOCHIP) {
-                                uint16_t instructionWord = readU16(memory, pc + 2);
-                                if(instructionWord == 0xF000) {
-                                    pc += 2;
-                                }
-                            }
-                            pc += 2;
+                            nextPC = nextPC + getInstructionSize(memory, nextPC);
                         }
                         break;
                     }
                     case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
                         if(!interface.pressed(registers[xArgument])) {
-                            if(platform == XOCHIP) {
-                                uint16_t instructionWord = readU16(memory, pc + 2);
-                                if(instructionWord == 0xF000) {
-                                    pc += 2;
-                                }
-                            }
-                            pc += 2;
+                            nextPC = nextPC + getInstructionSize(memory, nextPC);
                         } else {
                             if(debug & DEBUG_KEYS) {
                                 printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
@@ -662,7 +627,6 @@ struct Chip8Interpreter
                         break;
                     }
                 }
-                pc += 2;
                 break;
             }
             case INSN_LD_SPECIAL :{
@@ -704,7 +668,7 @@ struct Chip8Interpreter
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             I = memory.getBigDigitLocation(registers[xArgument]);
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD BIGF) - does this ROM require \"schip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD BIGF) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -745,17 +709,16 @@ struct Chip8Interpreter
                         if(platform == XOCHIP) {
                             I = readU16(memory, pc + 2);
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
-                        pc += 2;
                         break;
                     }
                     case SPECIAL_SET_PLANES: { // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
                         if(platform == XOCHIP) {
                             screenPlaneMask = xArgument;
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -764,7 +727,7 @@ struct Chip8Interpreter
                         if(platform == XOCHIP) {
                             // XXX TBD
                         } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" features?\n", instructionWord);
+                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
                         }
                         break;
@@ -775,10 +738,10 @@ struct Chip8Interpreter
                         break;
                     }
                 }
-                pc += 2;
                 break;
             }
         }
+        pc = nextPC;
         return stepResult;
     }
 };
