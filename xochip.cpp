@@ -421,6 +421,12 @@ struct Chip8Interpreter
                     case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
                         if(registers[xArgument] == registers[yArgument]) {
                             pc += 4;
+                            if(platform == XOCHIP) {
+                                uint16_t instructionWord = readU16(memory, pc + 2);
+                                if(instructionWord == 0xF000) {
+                                    pc += 2;
+                                }
+                            }
                         } else {
                             pc += 2;
                         }
