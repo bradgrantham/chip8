@@ -560,7 +560,7 @@ struct Chip8Interpreter
                 // is outside the coordinates of the display, it wraps around to the opposite side of
                 // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
                 // Display, for more information on the Chip-8 screen and sprites.
-                int erased = 0;
+                registers[0xF] = 0;
                 uint32_t screenWidth = extendedScreenMode ? 128 : 64;
                 uint32_t screenHeight = extendedScreenMode ? 64 : 32;
                 uint32_t pixelScale = extendedScreenMode ? 1 : 2;
@@ -568,48 +568,42 @@ struct Chip8Interpreter
                 uint32_t byteCount = 1;
                 uint32_t rowCount = imm4Argument;
                 if(extendedScreenMode && (imm4Argument == 0)) {
+                    // 16x16 sprite
                     rowCount = 16;
                     byteCount = 2;
-                    // 16x16 sprite
                 }
                 for(int bitplane = 0; bitplane < 2; bitplane++) {
                     uint8_t planeMask = 1 << bitplane;
                     if(screenPlaneMask & planeMask) {
                         for(uint32_t rowIndex = 0; rowIndex < rowCount; rowIndex++) {
                             for(uint32_t byteIndex = 0; byteIndex < byteCount; byteIndex++) {
-                                uint8_t byte = memory.read(spriteByteAddress);
-                                spriteByteAddress++;
+                                uint8_t byte = memory.read(spriteByteAddress++);
                                 for(uint32_t bitIndex = 0; bitIndex < 8; bitIndex++) {
                                     bool hasPixel = (byte >> (7 - bitIndex)) & 0x1;
+                                    uint32_t colIndex = bitIndex + byteIndex * 8;
+                                    if(quirks & QUIRKS_CLIP) {
+                                        hasPixel &= (((registers[xArgument] % screenWidth) + colIndex) < screenWidth) &&
+                                            (((registers[yArgument] % screenHeight) + rowIndex) < screenHeight);
+                                    }
                                     if(hasPixel) {
-                                        uint32_t x = registers[xArgument] + bitIndex + byteIndex * 8;
-                                        uint32_t y = registers[yArgument] + rowIndex;
-                                        uint32_t clipX = x % screenWidth;
-                                        uint32_t clipY = y + x / screenWidth;
-                                        bool oneErased = false;
+                                        uint32_t x = (registers[xArgument] + colIndex) % screenWidth;
+                                        uint32_t y = (registers[yArgument] + rowIndex) % screenHeight;
                                         if(debug & DEBUG_DRAW) {
-                                            printf("draw %d %d (%d %d) (%d)\n", x, y, clipX, clipY, clipX + clipY * 64);
+                                            printf("draw %d %d (%d)\n", x, y, x + y * 64);
                                         }
-                                        if(clipY < screenHeight) {
-                                            for(uint32_t ygrid = 0; ygrid < pixelScale; ygrid++) {
-                                                for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
-                                                    oneErased |= interface.draw(clipX * pixelScale + xgrid, clipY * pixelScale + ygrid, planeMask);
-                                                }
+                                        for(uint32_t ygrid = 0; ygrid < pixelScale; ygrid++) {
+                                            for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
+                                                int x2 = x * pixelScale + xgrid;
+                                                int y2 = y * pixelScale + ygrid;
+                                                registers[0xF] |= interface.draw(x2, y2, planeMask);
                                             }
-                                        } else {
-                                            oneErased |= true;
                                         }
-                                        if(oneErased && (debug & DEBUG_DRAW)) {
-                                            printf("set VF\n");
-                                        }
-                                        erased += oneErased ? 1 : 0;
                                     }
                                 }
                             }
                         }
                     }
                 }
-                registers[0xF] = (erased > 0) ? 1 : 0;
                 break;
             }
             case INSN_SKP: {
@@ -1131,18 +1125,47 @@ std::vector<uint8_t> digitSprites = {
 #endif
 };
 
+
 std::vector<uint8_t> largeDigitSprites = {
-    // TBD
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+#if 0
+The MIT License (MIT)
+
+Copyright (c) 2015, John Earnest
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+#endif
+    0xFF, 0xFF, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, // 0
+    0x18, 0x78, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0xFF, 0xFF, // 1
+    0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, // 2
+    0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 3
+    0xC3, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, 0x03, 0x03, 0x03, 0x03, // 4
+    0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 5
+    0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, // 6
+    0xFF, 0xFF, 0x03, 0x03, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x18, // 7
+    0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, // 8
+    0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 9
+    0x7E, 0xFF, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, 0xC3, 0xC3, 0xC3, // A
+    0xFC, 0xFC, 0xC3, 0xC3, 0xFC, 0xFC, 0xC3, 0xC3, 0xFC, 0xFC, // B
+    0x3C, 0xFF, 0xC3, 0xC0, 0xC0, 0xC0, 0xC0, 0xC3, 0xFF, 0x3C, // C
+    0xFC, 0xFE, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xFE, 0xFC, // D
+    0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, // E
+    0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC0, 0xC0, 0xC0, 0xC0  // F
 };
 
 struct Memory
@@ -1167,7 +1190,7 @@ struct Memory
         }
         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
             for(uint16_t i = 0; i < largeDigitSprites.size(); i++) {
-                uint16_t address = 0x200 - 80 - (uint16_t)largeDigitSprites.size() + i;
+                uint16_t address = (uint16_t)largeDigitSprites.size() + i;
                 write(address, largeDigitSprites[i]);
                 if(i % 10 == 0) {
                     largeDigitAddresses[i / 10] = address;
@@ -1203,7 +1226,9 @@ struct Memory
         if((platform != SCHIP_1_1) && (platform != XOCHIP)) {
             abort();
         }
-        assert(digit < 10);
+        if(platform != XOCHIP) {
+            assert(digit < 10);
+        }
         return largeDigitAddresses[digit];
     }
 };
