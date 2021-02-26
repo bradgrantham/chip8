@@ -134,6 +134,9 @@ int main(int argc, char **argv)
     if(options.contains("blendColor")) {
         emulatorArgs.push_back("--color 3 " + convertToHexColor(options["blendColor"]));
     }
+    if(options.contains("screenRotation")) {
+        emulatorArgs.push_back("--rotation " + std::to_string(options["screenRotation"].get<int>()));
+    }
 
     if(hasTrueOption(options, "shiftQuirks")) {
         emulatorArgs.push_back("--quirk shift");
