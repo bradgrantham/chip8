@@ -47,6 +47,11 @@ enum ChipPlatform
     XOCHIP
 };
 
+enum DisplayRotation
+{
+    ROT_0, ROT_90, ROT_180, ROT_270
+};
+
 void disassemble(uint16_t pc, uint16_t instructionWord, uint16_t wordAfter);
 
 template <class MEMORY, class INTERFACE>
@@ -1209,14 +1214,45 @@ struct Interface
     bool displayChanged = true;
     bool closed = false;
     std::array<bool, 16> keyPressed;
+    DisplayRotation rotation;
 
     bool succeeded = false;
 
-    static constexpr int windowInitialScaleFactor = 8;
+    static int initialScaleFactor(DisplayRotation rotation) {
+        switch(rotation) {
+            case ROT_0: return 8;
+            case ROT_90: return 4;
+            case ROT_180: return 8;
+            case ROT_270: return 4;
+        }
+    }
+
     mfb_window *window;
-    int windowWidth = 128 * windowInitialScaleFactor;
-    int windowHeight = 64 * windowInitialScaleFactor;
+    int windowWidth;
+    int windowHeight;
     uint32_t* windowBuffer;
+
+    Interface(const std::string& name, DisplayRotation rotation) :
+        rotation(rotation),
+        windowWidth((((rotation == ROT_0) || (rotation == ROT_180)) ? 128 : 64) * initialScaleFactor(rotation)),
+        windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation))
+    {
+        keyPressed.fill(false);
+        window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
+        if (window) {
+            windowBuffer = new uint32_t[windowWidth * windowHeight];
+            mfb_set_user_data(window, (void *) this);
+            mfb_set_resize_callback(window, resizecb);
+            mfb_set_keyboard_callback(window, keyboardcb);
+            succeeded = true;
+        }
+        colorTable.fill({0,0,0});
+        colorTable[0] = {0, 0, 0};
+        colorTable[1] = {255, 255, 255};
+        colorTable[2] = {170, 170, 170};
+        colorTable[3] = {85, 85, 85};
+        clear();
+    }
 
     void scroll(int dx, int dy)
     {
@@ -1239,8 +1275,29 @@ struct Interface
     {
         for(int row = 0; row < windowHeight; row++) {
             for(int col = 0; col < windowWidth; col++) {
-                int displayX = col * 128 / windowWidth;
-                int displayY = row * 64 / windowHeight;
+                int displayX, displayY;
+                switch(rotation) {
+                    case ROT_0: {
+                        displayX = col * 128 / windowWidth;
+                        displayY = row * 64 / windowHeight;
+                        break;
+                    }
+                    case ROT_90: {
+                        displayX = row * 128 / windowHeight;
+                        displayY = 64 - 1 - col * 64 / windowWidth;
+                        break;
+                    }
+                    case ROT_180: {
+                        displayX = 128 - 1 - col * 128 / windowWidth;
+                        displayY = 64 - 1 - row * 64 / windowHeight;
+                        break;
+                    }
+                    case ROT_270: {
+                        displayX = 128 - 1 - row * 128 / windowHeight;
+                        displayY = col * 64 / windowWidth;
+                        break;
+                    }
+                }
                 uint8_t pixel = display.at(displayY).at(displayX);
                 auto &c = colorTable.at(pixel);
                 windowBuffer[col + row * windowWidth] = MFB_RGB(c[0], c[1], c[2]);
@@ -1318,25 +1375,6 @@ struct Interface
         return success && !closed;
     }
 
-    Interface(const std::string& name)
-    {
-        keyPressed.fill(false);
-        window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
-        if (window) {
-            windowBuffer = new uint32_t[windowWidth * windowHeight];
-            mfb_set_user_data(window, (void *) this);
-            mfb_set_resize_callback(window, resizecb);
-            mfb_set_keyboard_callback(window, keyboardcb);
-            succeeded = true;
-        }
-        colorTable.fill({0,0,0});
-        colorTable[0] = {0, 0, 0};
-        colorTable[1] = {255, 255, 255};
-        colorTable[2] = {170, 170, 170};
-        colorTable[3] = {85, 85, 85};
-        clear();
-    }
-
     void startSound()
     {
         printf("sound\n");
@@ -1405,6 +1443,13 @@ std::map<std::string, uint32_t> keywordsToQuirkValues = {
     {"clip", QUIRKS_CLIP},
 };
 
+std::map<std::string, DisplayRotation> keywordsToRotationValues = {
+    {"rot0", ROT_0},
+    {"rot90", ROT_90},
+    {"rot180", ROT_180},
+    {"rot270", ROT_270},
+};
+
 int main(int argc, char **argv)
 {
     const char *progname = argv[0];
@@ -1413,6 +1458,7 @@ int main(int argc, char **argv)
 
     int ticksPerField = 7;
     ChipPlatform platform = CHIP8;
+    DisplayRotation rotation = ROT_0;
     uint32_t quirks = QUIRKS_NONE;
     std::map<int,vec3ub> colorTable;
 
@@ -1443,6 +1489,26 @@ int main(int argc, char **argv)
                 fprintf(stderr, "unknown platform name \"%s\".\n", argv[1]);
                 usage(progname);
                 exit(EXIT_FAILURE);
+            }
+            argv += 2;
+            argc -= 2;
+        } else if(strcmp(argv[0], "--rotation") == 0) {
+            if(argc < 2) {
+                fprintf(stderr, "--rotation option requires a screen rotation value in degrees (0, 90, 180, 270).\n");
+                usage(progname);
+                exit(EXIT_FAILURE);
+            }
+            int angle = atoi(argv[1]);
+            switch(angle) {
+                case 0: rotation = ROT_0; break;
+                case 90: rotation = ROT_90; break;
+                case 180: rotation = ROT_180; break;
+                case 270: rotation = ROT_270; break;
+                default: {
+                    fprintf(stderr, "rotation value %d is not implemented\n", angle);
+                    usage(progname);
+                    exit(EXIT_FAILURE);
+                }
             }
             argv += 2;
             argc -= 2;
@@ -1507,11 +1573,11 @@ int main(int argc, char **argv)
 
 #ifdef XCODE_MISSING_FILESYSTEM_FOR_YEARS
     char *base = strdup(argv[0]);
-    Interface interface(basename(base));
+    Interface interface(basename(base), rotation);
     free(base);
 #else
     std::filesystem::path base(argv[0]);
-    Interface interface(base.filename().string());
+    Interface interface(base.filename().string(), rotation);
 #endif
     Memory memory(platform);
 
