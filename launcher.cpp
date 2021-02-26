@@ -146,6 +146,10 @@ int main(int argc, char **argv)
         emulatorArgs.push_back("--quirk loadstore");
     }
 
+    if(hasTrueOption(options, "logicQuirks")) {
+        emulatorArgs.push_back("--quirk logic");
+    }
+
     if(hasTrueOption(options, "vfOrderQuirks")) {
         emulatorArgs.push_back("--quirk vforder");
     }

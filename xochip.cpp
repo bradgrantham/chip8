@@ -40,6 +40,7 @@ constexpr uint32_t QUIRKS_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
 constexpr uint32_t QUIRKS_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
 constexpr uint32_t QUIRKS_CLIP = 0x08;            /* no draw or collide wrapped, VX += rows off bottom */
 constexpr uint32_t QUIRKS_VFORDER = 0x10;         /* VF is set first in ADD, SUB, SH ALU operations */
+constexpr uint32_t QUIRKS_LOGIC = 0x20;           /* VF is cleared after logic ALU operations */
 
 enum ChipPlatform
 {
@@ -466,17 +467,23 @@ struct Chip8Interpreter
                     }
                     case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
                         registers[xArgument] |= registers[yArgument];
-                        // XXX logicQuirk registers[0xF] = 0;
+                        if(quirks & QUIRKS_LOGIC) {
+                            registers[0xF] = 0;
+                        }
                         break;
                     }
                     case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
                         registers[xArgument] &= registers[yArgument];
-                        // XXX logicQuirk registers[0xF] = 0;
+                        if(quirks & QUIRKS_LOGIC) {
+                            registers[0xF] = 0;
+                        }
                         break;
                     }
                     case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
                         registers[xArgument] ^= registers[yArgument];
-                        // XXX logicQuirk registers[0xF] = 0;
+                        if(quirks & QUIRKS_LOGIC) {
+                            registers[0xF] = 0;
+                        }
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
@@ -1442,6 +1449,8 @@ std::map<std::string, uint32_t> keywordsToQuirkValues = {
     {"loadstore", QUIRKS_LOAD_STORE},
     {"jump", QUIRKS_JUMP},
     {"clip", QUIRKS_CLIP},
+    {"vforder", QUIRKS_VFORDER},
+    {"logic", QUIRKS_LOGIC},
 };
 
 std::map<std::string, DisplayRotation> keywordsToRotationValues = {
