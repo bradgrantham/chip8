@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <unordered_map>
 #include <map>
 #include <string>
@@ -65,6 +66,7 @@ struct Chip8Interpreter
     uint64_t clock = 0;
 
     std::array<uint8_t, 16> registers = {0};
+    std::array<uint8_t, 8> RPL = {0};
     std::vector<uint16_t> stack;
     uint16_t I = 0;
     uint16_t pc = 0;
@@ -155,8 +157,8 @@ struct Chip8Interpreter
         SPECIAL_LD_BCD = 0x33,
         SPECIAL_LD_IVX = 0x55,
         SPECIAL_LD_VXI = 0x65,
-        SPECIAL_STORE_RPL = 0x75, // XXX ignored 
-        SPECIAL_LD_RPL = 0x85, // XXX ignored 
+        SPECIAL_STORE_RPL = 0x75,
+        SPECIAL_LD_RPL = 0x85,
         SPECIAL_LD_BIGDIGIT = 0x30,
         SPECIAL_LD_I_16BIT = 0x00,
         SPECIAL_SET_PLANES = 0x01,
@@ -705,11 +707,26 @@ struct Chip8Interpreter
                         break;
                     }
                     case SPECIAL_STORE_RPL: {
-                        fprintf(stderr, "unsupported FxNN instruction %04X (LD RPL) ignored\n", instructionWord);
+                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                            for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
+                                RPL[i] = registers[i];
+                            }
+                        } else {
+                            fprintf(stderr, "unsupported FXNN instruction %04X (STORE_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
+                            stepResult = UNSUPPORTED_INSTRUCTION;
+                        }
                         break;
                     }
                     case SPECIAL_LD_RPL: {
-                        fprintf(stderr, "unsupported FxNN instruction %04X (LD RPL) ignored\n", instructionWord);
+                        fprintf(stderr, "unsupported FxNN instruction %04X (LD_RPL) ignored\n", instructionWord);
+                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                            for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
+                                registers[i] = RPL[i];
+                            }
+                        } else {
+                            fprintf(stderr, "unsupported FXNN instruction %04X (LD_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
+                            stepResult = UNSUPPORTED_INSTRUCTION;
+                        }
                         break;
                     }
                     case SPECIAL_LD_I_16BIT: { // F000 NNNN
