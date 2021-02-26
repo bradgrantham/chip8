@@ -1172,9 +1172,9 @@ struct Memory
 {
     std::array<uint8_t, 65536> memory;
 
-    std::array<uint16_t, 16> digitAddresses;
+    std::array<uint16_t, 16> digitAddresses = {0};
 
-    std::array<uint16_t, 10> largeDigitAddresses = {0};
+    std::array<uint16_t, 16> largeDigitAddresses = {0};
 
     ChipPlatform platform;
 
@@ -1182,7 +1182,7 @@ struct Memory
         platform(platform)
     {
         for(uint16_t i = 0; i < digitSprites.size(); i++) {
-            uint16_t address = i; //  0x200 - 80 + i
+            uint16_t address = i;
             write(address, digitSprites[i]);
             if(i % 5 == 0) {
                 digitAddresses[i / 5] = address;
@@ -1190,7 +1190,7 @@ struct Memory
         }
         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
             for(uint16_t i = 0; i < largeDigitSprites.size(); i++) {
-                uint16_t address = (uint16_t)largeDigitSprites.size() + i;
+                uint16_t address = (uint16_t)digitSprites.size() + i;
                 write(address, largeDigitSprites[i]);
                 if(i % 10 == 0) {
                     largeDigitAddresses[i / 10] = address;
@@ -1614,6 +1614,7 @@ int main(int argc, char **argv)
     std::filesystem::path base(argv[0]);
     Interface interface(base.filename().string(), rotation);
 #endif
+
     Memory memory(platform);
 
     for(const auto& [index, color] : colorTable) {
