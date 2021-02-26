@@ -39,6 +39,7 @@ constexpr uint32_t QUIRKS_SHIFT = 0x01;           /* shift VX instead of VY */
 constexpr uint32_t QUIRKS_LOAD_STORE = 0x02;      /* don't add X + 1 to I */
 constexpr uint32_t QUIRKS_JUMP = 0x04;            /* VX is used as offset *and* X used as address high nybble */
 constexpr uint32_t QUIRKS_CLIP = 0x08;            /* no draw or collide wrapped, VX += rows off bottom */
+constexpr uint32_t QUIRKS_VFORDER = 0x10;         /* VF is set first in ADD, SUB, SH ALU operations */
 
 enum ChipPlatform
 {
@@ -201,6 +202,17 @@ struct Chip8Interpreter
             }
         } else {
             return 2;
+        }
+    }
+
+    void storeALUResult(int destination, uint8_t result, bool f)
+    {
+        if(quirks & QUIRKS_VFORDER) {
+            registers[0xF] = f ? 1 : 0;
+            registers[destination] = result;
+        } else {
+            registers[destination] = result;
+            registers[0xF] = f ? 1 : 0;
         }
     }
 
@@ -468,45 +480,34 @@ struct Chip8Interpreter
                         break;
                     }
                     case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
-                        uint16_t result16 = registers[xArgument] + registers[yArgument]; // XXX collapse into line below
-                        bool flag = result16 > 0xFF;
-                        registers[xArgument] = registers[xArgument] + registers[yArgument];
-                        registers[0xF] = flag ? 1 : 0;
-                        // XXX vfOrderQuirk
+                        uint8_t result = registers[xArgument] + registers[yArgument];
+                        storeALUResult(xArgument, result, result > 0xFF);
                         break;
                     }
                     case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        bool flag = registers[xArgument] >= registers[yArgument];
-                        registers[xArgument] = registers[xArgument] - registers[yArgument];
-                        registers[0xF] = flag ? 1 : 0;
-                        // XXX vfOrderQuirk
+                        uint8_t result = registers[xArgument] - registers[yArgument];
+                        storeALUResult(xArgument, result, registers[xArgument] >= registers[yArgument]);
                         break;
                     }
                     case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        bool flag = registers[yArgument] >= registers[xArgument];
-                        registers[xArgument] = registers[yArgument] - registers[xArgument];
-                        registers[0xF] = flag ? 1 : 0;
-                        // XXX vfOrderQuirk
+                        uint8_t result = registers[yArgument] - registers[xArgument];
+                        storeALUResult(xArgument, result, registers[yArgument] >= registers[xArgument]);
                         break;
                     }
                     case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
-                        bool flag = registers[yArgument] & 0x1;
-                        registers[xArgument] = registers[yArgument] / 2;
-                        registers[0xF] = flag ? 1 : 0;
-                        // XXX vfOrderQuirk
+                        uint8_t result = registers[yArgument] / 2;
+                        storeALUResult(xArgument, result, registers[yArgument] & 0x10);
                         break;
                     }
                     case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
                         if(quirks & QUIRKS_SHIFT) {
                             yArgument = xArgument;
                         }
-                        bool flag = registers[yArgument] & 0x80;
-                        registers[xArgument] = registers[yArgument] * 2;
-                        registers[0xF] = flag ? 1 : 0;
-                        // XXX vfOrderQuirk
+                        uint8_t result = registers[yArgument] * 2;
+                        storeALUResult(xArgument, result, registers[yArgument] & 0x80);
                         break;
                     }
                     default : {
