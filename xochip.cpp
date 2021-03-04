@@ -597,7 +597,9 @@ struct Chip8Interpreter
                                             for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
                                                 int x2 = x * pixelScale + xgrid;
                                                 int y2 = y * pixelScale + ygrid;
-                                                registers[0xF] |= interface.draw(x2, y2, planeMask);
+                                                if(interface.draw(x2, y2, planeMask)) {
+                                                    registers[0xF] = 1;
+                                                }
                                             }
                                         }
                                     }
@@ -1288,6 +1290,15 @@ struct Interface
         windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation))
     {
         keyPressed.fill(false);
+
+        colorTable.fill({0,0,0});
+        colorTable[0] = {0, 0, 0};
+        colorTable[1] = {255, 255, 255};
+        colorTable[2] = {170, 170, 170};
+        colorTable[3] = {85, 85, 85};
+
+        clear();
+
         window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
         if (window) {
             windowBuffer = new uint32_t[windowWidth * windowHeight];
@@ -1296,12 +1307,6 @@ struct Interface
             mfb_set_keyboard_callback(window, keyboardcb);
             succeeded = true;
         }
-        colorTable.fill({0,0,0});
-        colorTable[0] = {0, 0, 0};
-        colorTable[1] = {255, 255, 255};
-        colorTable[2] = {170, 170, 170};
-        colorTable[3] = {85, 85, 85};
-        clear();
     }
 
     void scroll(int dx, int dy)
@@ -1446,8 +1451,8 @@ struct Interface
         displayChanged = true; /* pixel will either be set or cleared... */
 
         if((x < 128) && (y < 64)) {
-            auto& pixel = display.at(y).at(x);
-            auto oldValue = pixel;
+            uint8_t& pixel = display.at(y).at(x);
+            uint8_t oldValue = pixel;
             for(int i = 0; i < 2; i++) {
                 uint8_t bit = (0x1 << i);
                 if(planeMask & bit) {
@@ -1631,6 +1636,11 @@ int main(int argc, char **argv)
     std::filesystem::path base(argv[0]);
     Interface interface(base.filename().string(), rotation);
 #endif
+
+    if(!interface.succeeded) {
+        fprintf(stderr, "opening the display failed.\n");
+        exit(EXIT_FAILURE);
+    }
 
     Memory memory(platform);
 
