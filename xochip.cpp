@@ -508,7 +508,7 @@ struct Chip8Interpreter
                             yArgument = xArgument;
                         }
                         uint8_t result = registers[yArgument] / 2;
-                        storeALUResult(xArgument, result, registers[yArgument] & 0x10);
+                        storeALUResult(xArgument, result, registers[yArgument] & 0x1);
                         break;
                     }
                     case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
