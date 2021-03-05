@@ -1459,9 +1459,9 @@ struct Interface
                 if(planeMask & bit) {
                     pixel = pixel ^ bit;
                 }
-            }
-            if((oldValue != 0) && (pixel == 0)) {
-                erased = true;
+                if(((oldValue & bit) != 0) && ((pixel & bit) == 0)) {
+                    erased = true;
+                }
             }
         }
 
