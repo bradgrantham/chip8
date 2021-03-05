@@ -569,7 +569,7 @@ struct Chip8Interpreter
                 uint16_t spriteByteAddress = I;
                 uint32_t byteCount = 1;
                 uint32_t rowCount = imm4Argument;
-                if(extendedScreenMode && (imm4Argument == 0)) {
+                if(((platform == SCHIP_1_1) || (platform == XOCHIP)) && (imm4Argument == 0)) {
                     // 16x16 sprite
                     rowCount = 16;
                     byteCount = 2;
