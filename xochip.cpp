@@ -337,6 +337,7 @@ struct Chip8Interpreter
                     case SYS_EXTENDED_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = true;
+                            interface.clear();
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (EXTENDEDSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -346,6 +347,7 @@ struct Chip8Interpreter
                     case SYS_ORIGINAL_SCREEN: { // 00FE*    Disable extended screen mode
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             extendedScreenMode = false;
+                            interface.clear();
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (ORIGINALSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
