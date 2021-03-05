@@ -720,7 +720,6 @@ struct Chip8Interpreter
                         break;
                     }
                     case SPECIAL_LD_RPL: {
-                        fprintf(stderr, "unsupported FxNN instruction %04X (LD_RPL) ignored\n", instructionWord);
                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
                             for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
                                 registers[i] = RPL[i];
