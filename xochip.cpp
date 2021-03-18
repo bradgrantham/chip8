@@ -36,19 +36,20 @@ struct Clock
     {}
 
     Clock(const Clock& clock) :
-        rate(rate), 
+        rate(clock.rate), 
         clocks(clock.clocks)
     {}
 
     Clock(const Clock& clock, clk_t newClocks) :
-        rate(rate), 
-        clocks(newClock)
+        rate(clock.rate), 
+        clocks(newClocks)
     {}
 
     Clock& operator=(const Clock& clock)
     {
         clocks = clock.clocks;
         rate = clock.rate;
+        return *this;
     }
 
     Clock& operator+=(clk_t inc)
@@ -57,7 +58,7 @@ struct Clock
         return *this;
     }
 
-    operator clk_t() {return clocks;}
+    operator clk_t() const { return clocks; }
 };
 
 constexpr int XOChipAudioSampleRate = 4000;
@@ -114,7 +115,9 @@ struct Chip8Interpreter
     uint16_t I = 0;
     uint16_t pc = 0;
     uint8_t DT = 0;
+    uint64_t DTNextDecrementClock;
     uint8_t ST = 0;
+    uint64_t STNextDecrementClock;
     bool extendedScreenMode = false;
     uint32_t screenPlaneMask = 0x1;
  
@@ -140,19 +143,6 @@ struct Chip8Interpreter
     {
         assert(systemClock.rate % cpuClockRate == 0);
         cpuClockLengthInSystemClocks = systemClock.rate / cpuClockRate;
-    }
-
-    void tick(INTERFACE& interface)
-    {
-        if(DT > 0) {
-            DT--;
-        }
-        if(ST > 0) {
-            ST--;
-            if(ST == 0) {
-                interface.stopAudio();
-            }
-        }
     }
 
     enum InstructionHighNybble
@@ -278,6 +268,7 @@ struct Chip8Interpreter
         uint16_t xArgument = (instructionWord & 0x0F00) >> 8;
         uint16_t yArgument = (instructionWord & 0x00F0) >> 4;
         int highNybble = instructionWord >> 12;
+        bool issueInstruction = true;
 
         if(waitingForKeyPress) {
 
@@ -299,529 +290,547 @@ struct Chip8Interpreter
                 waitingForKeyPress = false;
                 waitingForKeyRelease = true;
             } else {
-                return CONTINUE;
+                issueInstruction = false;
             }
         }
 
         if(waitingForKeyRelease) {
-            bool wasReleased = !interface.pressed(keyPressed);
-
-            if(wasReleased) {
+            if(!interface.pressed(keyPressed)) {
                 if(debug & DEBUG_KEYS) {
                     printf("key wait over\n");
                 }
                 waitingForKeyRelease = false;
                 registers[keyDestinationRegister] = keyPressed;
             } else {
-                return CONTINUE;
+                issueInstruction = false;
             }
         }
 
-        if(debug & DEBUG_STATE) {
-            printf("CHIP8: clk:%llu pc:%04X I:%04X ", insnNumber++, pc, I);
-            for(int i = 0; i < 16; i++) {
-                printf("%02X ", registers[i]);
+        if(issueInstruction) {
+
+            if(debug & DEBUG_STATE) {
+                printf("CHIP8: clk:%llu pc:%04X I:%04X ", insnNumber++, pc, I);
+                for(int i = 0; i < 16; i++) {
+                    printf("%02X ", registers[i]);
+                }
+                puts("");
             }
-            puts("");
+
+            if(debug & DEBUG_ASM) {
+                uint16_t wordAfter = readU16(memory, pc + 2);
+                disassemble(pc, instructionWord, wordAfter);
+            }
+
+            if(false) {
+                if(false && (insnNumber >= 43757)) {
+                    for(int row = 0; row < 32; row++) {
+                        for(int col = 0; col < 64; col++) {
+                            printf("%c", interface.display.at(row * 2).at(col * 2) ? '#' : '.');
+                        }
+                        puts("");
+                    }
+                }
+            }
+
+            uint16_t nextPC = pc + getInstructionSize(memory, pc);
+
+            switch(highNybble) {
+                case INSN_SYS: {
+                                   uint16_t sysOpcode = instructionWord & 0xFFF;
+                                   switch(sysOpcode) {
+                                       case SYS_CLS: { // 00E0 - CLS - Clear the display.
+                                                         interface.clear();
+                                                         break;
+                                                     }
+                                       case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
+                                                         nextPC = stack.back();
+                                                         stack.pop_back();
+                                                         break;
+                                                     }
+                                       case SYS_SCROLL_RIGHT_4: { // 00FB*    Scroll display 4 pixels right
+                                                                    if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                        interface.scroll(-4, 0);
+                                                                    } else {
+                                                                        fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL RIGHT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                        stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                    }
+                                                                    break;
+                                                                }
+                                       case SYS_SCROLL_LEFT_4: { // 00FC*    Scroll display 4 pixels left
+                                                                   if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                       interface.scroll(4, 0);
+                                                                   } else {
+                                                                       fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL ELFT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                       stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                   }
+                                                                   break;
+                                                               }
+                                       case SYS_EXIT: { // 00FD*    Exit CHIP interpreter
+                                                          if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                              stepResult = EXIT_INTERPRETER;
+                                                          } else {
+                                                              fprintf(stderr, "unsupported 0XXX instruction %04X (EXIT) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                              stepResult = UNSUPPORTED_INSTRUCTION;
+                                                          }
+                                                          break;
+                                                      }
+                                       case SYS_EXTENDED_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
+                                                                     if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                         extendedScreenMode = true;
+                                                                         interface.clear();
+                                                                     } else {
+                                                                         fprintf(stderr, "unsupported 0XXX instruction %04X (EXTENDEDSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                         stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                     }
+                                                                     break;
+                                                                 }
+                                       case SYS_ORIGINAL_SCREEN: { // 00FE*    Disable extended screen mode
+                                                                     if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                         extendedScreenMode = false;
+                                                                         interface.clear();
+                                                                     } else {
+                                                                         fprintf(stderr, "unsupported 0XXX instruction %04X (ORIGINALSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                         stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                     }
+                                                                     break;
+                                                                 }
+                                       default : { // Opcode undefined or is a range
+                                                     if((sysOpcode & 0xFF0) == SYS_SCROLL_UP) {
+                                                         // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
+                                                         if(platform == XOCHIP) {
+                                                             interface.scroll(0, imm4Argument);
+                                                         } else {
+                                                             fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL UP) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                             stepResult = UNSUPPORTED_INSTRUCTION;
+                                                         }
+                                                     } else if((sysOpcode & 0xFF0) == SYS_SCROLL_DOWN) {
+                                                         // 00CN*    Scroll display N lines down
+                                                         if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                             interface.scroll(0, -imm4Argument);
+                                                         } else {
+                                                             fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL DOWN) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                             stepResult = UNSUPPORTED_INSTRUCTION;
+                                                         }
+                                                     } else {
+                                                         fprintf(stderr, "%04X: unsupported 0NNN instruction %04X \n", pc, instructionWord);
+                                                         stepResult = UNSUPPORTED_INSTRUCTION;
+                                                     }
+                                                     break;
+                                                 }
+                                   }
+                                   break;
+                               }
+                case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
+                                  nextPC = imm12Argument;
+                                  break;
+                              }
+                case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
+                                    stack.push_back(nextPC);
+                                    nextPC = imm12Argument;
+                                    break;
+                                }
+                case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
+                                      if(registers[xArgument] == imm8Argument) {
+                                          nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                      }
+                                      break;
+                                  }
+                case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
+                                       if(registers[xArgument] != imm8Argument) {
+                                           nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                       }
+                                       break;
+                                   }
+                case INSN_HIGH5: {
+                                     uint8_t opcode = instructionWord & 0xF;
+                                     switch(opcode) {
+                                         case HIGH5_LD_I_VXVY : { // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
+                                                                    if(platform == XOCHIP) {
+                                                                        if(xArgument < yArgument) {
+                                                                            for(int i = 0; i <= yArgument - xArgument; i++) {
+                                                                                memory.write(I + i, registers[xArgument + i]);
+                                                                            }
+                                                                        } else {
+                                                                            for(int i = 0; i <= xArgument - yArgument; i++) {
+                                                                                memory.write(I + i, registers[xArgument - i]);
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                                        stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                    }
+                                                                    break;
+                                                                }
+                                         case HIGH5_LD_VXVY_I : { // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
+                                                                    if(platform == XOCHIP) {
+                                                                        if(xArgument < yArgument) {
+                                                                            for(int i = 0; i <= yArgument - xArgument; i++) {
+                                                                                registers[xArgument + i] = memory.read(I + i);
+                                                                            }
+                                                                        } else {
+                                                                            for(int i = 0; i <= xArgument - yArgument; i++) {
+                                                                                registers[xArgument - i] = memory.read(I + i);
+                                                                            }
+                                                                        }
+                                                                    } else {
+                                                                        fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                                        stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                    }
+                                                                    break;
+                                                                }
+                                         case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
+                                                                 if(registers[xArgument] == registers[yArgument]) {
+                                                                     nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                                                 }
+                                                                 break;
+                                                             }
+                                         default : {
+                                                       if(opcode != 0) {
+                                                           fprintf(stderr, "%04X: unsupported instruction %04X\n", pc, instructionWord);
+                                                           stepResult = UNSUPPORTED_INSTRUCTION;
+                                                       }
+                                                       break;
+                                                   }
+                                     }
+                                     break;
+                                 }
+                case INSN_LD_IMM: { // 6xkk - LD Vx, byte - Set Vx = kk.  The interpreter puts the value kk into register Vx.  
+                                      registers[xArgument] = imm8Argument;
+                                      break;
+                                  }
+                case INSN_ADD_IMM: { // 7xkk - ADD Vx, byte - Set Vx = Vx + kk.  Adds the value kk to the value of register Vx, then stores the result in Vx.
+                                       registers[xArgument] = registers[xArgument] + imm8Argument;
+                                       break;
+                                   }
+                case INSN_ALU: {
+                                   int opcode = instructionWord & 0x000F;
+                                   switch(opcode) {
+                                       case ALU_LD: { // 8xy0 - LD Vx, Vy - Set Vx = Vy.  Stores the value of register Vy in register Vx.  
+                                                        registers[xArgument] = registers[yArgument];
+                                                        break;
+                                                    }
+                                       case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
+                                                        registers[xArgument] |= registers[yArgument];
+                                                        if(quirks & QUIRKS_LOGIC) {
+                                                            registers[0xF] = 0;
+                                                        }
+                                                        break;
+                                                    }
+                                       case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
+                                                         registers[xArgument] &= registers[yArgument];
+                                                         if(quirks & QUIRKS_LOGIC) {
+                                                             registers[0xF] = 0;
+                                                         }
+                                                         break;
+                                                     }
+                                       case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
+                                                         registers[xArgument] ^= registers[yArgument];
+                                                         if(quirks & QUIRKS_LOGIC) {
+                                                             registers[0xF] = 0;
+                                                         }
+                                                         break;
+                                                     }
+                                       case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
+                                                         uint8_t result = registers[xArgument] + registers[yArgument];
+                                                         storeALUResult(xArgument, result, (registers[xArgument] + registers[yArgument]) > 0xFF);
+                                                         break;
+                                                     }
+                                       case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
+                                                         uint8_t result = registers[xArgument] - registers[yArgument];
+                                                         storeALUResult(xArgument, result, registers[xArgument] >= registers[yArgument]);
+                                                         break;
+                                                     }
+                                       case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
+                                                          uint8_t result = registers[yArgument] - registers[xArgument];
+                                                          storeALUResult(xArgument, result, registers[yArgument] >= registers[xArgument]);
+                                                          break;
+                                                      }
+                                       case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
+                                                         if(quirks & QUIRKS_SHIFT) {
+                                                             yArgument = xArgument;
+                                                         }
+                                                         uint8_t result = registers[yArgument] / 2;
+                                                         storeALUResult(xArgument, result, registers[yArgument] & 0x1);
+                                                         break;
+                                                     }
+                                       case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
+                                                         if(quirks & QUIRKS_SHIFT) {
+                                                             yArgument = xArgument;
+                                                         }
+                                                         uint8_t result = registers[yArgument] * 2;
+                                                         storeALUResult(xArgument, result, registers[yArgument] & 0x80);
+                                                         break;
+                                                     }
+                                       default : {
+                                                     fprintf(stderr, "%04X: unsupported 8xyN instruction %04X\n", pc, instructionWord);
+                                                     stepResult = UNSUPPORTED_INSTRUCTION;
+                                                     break;
+                                                 }
+                                   }
+                                   break;
+                               }
+                case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
+                                       if(imm4Argument != 0) {
+                                           fprintf(stderr, "%04X: unsupported 9XY0 instruction %04X\n", pc, instructionWord);
+                                           stepResult = UNSUPPORTED_INSTRUCTION;
+                                       }
+                                       if(registers[xArgument] != registers[yArgument]) {
+                                           nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                       }
+                                       break;
+                                   }
+                case INSN_LD_I: { // Annn - LD I, addr - Set I = nnn.  
+                                    I = imm12Argument;
+                                    break;
+                                }
+                case INSN_JP_V0: { // Bnnn - JP V0, addr - Jump to location nnn + V0.
+                                     if(quirks & QUIRKS_JUMP) { // Ugh!
+                                         nextPC = (imm12Argument & 0xFF) + registers[xArgument] + (xArgument << 8);
+                                     } else {
+                                         nextPC = imm12Argument + registers[0];
+                                     }
+                                     break;
+                                 }
+                case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
+                                   registers[xArgument] = uniform_dist(e1) & imm8Argument;
+                                   break;
+                               }
+                case INSN_DRW: { // Dxyn - DRW Vx, Vy, nibble
+                                   // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
+                                   // The interpreter reads n bytes from memory, starting at the address stored in
+                                   // I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
+                                   // Sprites are XORed onto the existing screen. If this causes any pixels to be erased,
+                                   // VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it
+                                   // is outside the coordinates of the display, it wraps around to the opposite side of
+                                   // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
+                                   // Display, for more information on the Chip-8 screen and sprites.
+                                   registers[0xF] = 0;
+                                   uint32_t screenWidth = extendedScreenMode ? 128 : 64;
+                                   uint32_t screenHeight = extendedScreenMode ? 64 : 32;
+                                   uint32_t pixelScale = extendedScreenMode ? 1 : 2;
+                                   uint16_t spriteByteAddress = I;
+                                   uint32_t byteCount = 1;
+                                   uint32_t rowCount = imm4Argument;
+                                   if(((platform == SCHIP_1_1) || (platform == XOCHIP)) && (imm4Argument == 0)) {
+                                       // 16x16 sprite
+                                       rowCount = 16;
+                                       byteCount = 2;
+                                   }
+                                   for(int bitplane = 0; bitplane < 2; bitplane++) {
+                                       uint8_t planeMask = 1 << bitplane;
+                                       if(screenPlaneMask & planeMask) {
+                                           for(uint32_t rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+                                               for(uint32_t byteIndex = 0; byteIndex < byteCount; byteIndex++) {
+                                                   uint8_t byte = memory.read(spriteByteAddress++);
+                                                   for(uint32_t bitIndex = 0; bitIndex < 8; bitIndex++) {
+                                                       bool hasPixel = (byte >> (7 - bitIndex)) & 0x1;
+                                                       uint32_t colIndex = bitIndex + byteIndex * 8;
+                                                       if(quirks & QUIRKS_CLIP) {
+                                                           hasPixel &= (((registers[xArgument] % screenWidth) + colIndex) < screenWidth) &&
+                                                               (((registers[yArgument] % screenHeight) + rowIndex) < screenHeight);
+                                                       }
+                                                       if(hasPixel) {
+                                                           uint32_t x = (registers[xArgument] + colIndex) % screenWidth;
+                                                           uint32_t y = (registers[yArgument] + rowIndex) % screenHeight;
+                                                           if(debug & DEBUG_DRAW) {
+                                                               printf("draw %d %d (%d)\n", x, y, x + y * 64);
+                                                           }
+                                                           for(uint32_t ygrid = 0; ygrid < pixelScale; ygrid++) {
+                                                               for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
+                                                                   int x2 = x * pixelScale + xgrid;
+                                                                   int y2 = y * pixelScale + ygrid;
+                                                                   if(interface.draw(x2, y2, planeMask)) {
+                                                                       registers[0xF] = 1;
+                                                                   }
+                                                               }
+                                                           }
+                                                       }
+                                                   }
+                                               }
+                                           }
+                                       }
+                                   }
+                                   break;
+                               }
+                case INSN_SKP: {
+                                   int opcode = instructionWord & 0xFF;
+                                   switch(opcode) {
+                                       case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
+                                                         if(interface.pressed(registers[xArgument])) {
+                                                             if(debug & DEBUG_KEYS) {
+                                                                 printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
+                                                             }
+                                                             nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                                         }
+                                                         break;
+                                                     }
+                                       case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
+                                                          if(!interface.pressed(registers[xArgument])) {
+                                                              nextPC = nextPC + getInstructionSize(memory, nextPC);
+                                                          } else {
+                                                              if(debug & DEBUG_KEYS) {
+                                                                  printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
+                                                              }
+                                                          }
+                                                          break;
+                                                      }
+                                       default : {
+                                                     fprintf(stderr, "%04X: unsupported ExNN instruction %04X\n", pc, instructionWord);
+                                                     stepResult = UNSUPPORTED_INSTRUCTION;
+                                                     break;
+                                                 }
+                                   }
+                                   break;
+                               }
+                case INSN_LD_SPECIAL :{
+                                          int opcode = instructionWord & 0xFF;
+                                          switch(opcode) {
+                                              case SPECIAL_GET_DELAY: { // Fx07 - LD Vx, DT - Set Vx = delay timer value.  The value of DT is placed into Vx.
+                                                                          registers[xArgument] = DT;
+                                                                          break;
+                                                                      }
+                                              case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
+                                                                        if(debug & DEBUG_KEYS) {
+                                                                            printf("waiting for key\n");
+                                                                        }
+                                                                        waitingForKeyPress = true;
+                                                                        keyDestinationRegister = xArgument;
+                                                                        break;
+                                                                    }
+                                              case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
+
+                                                                          DT = registers[xArgument];
+                                                                          DTNextDecrementClock = systemClock.clocks + systemClock.rate / 60;
+                                                                          break;
+                                                                      }
+                                              case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
+                                                                          ST = registers[xArgument];
+                                                                          if(ST > 0) {
+                                                                              interface.startAudio(systemClock);
+                                                                          }
+                                                                          STNextDecrementClock = systemClock.clocks + systemClock.rate / 60;
+                                                                          break;
+                                                                      }
+                                              case SPECIAL_ADD_INDEX: { // Fx1E - ADD I, Vx - Set I = I + Vx.  The values of I and Vx are added, and the results are stored in I.  
+                                                                          I += registers[xArgument];
+                                                                          break;
+                                                                      }
+                                              case SPECIAL_LD_DIGIT: { // Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.  The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx. See section 2.4, Display, for more information on the Chip-8 hexadecimal font.  
+                                                                         I = memory.getDigitLocation(registers[xArgument]);
+                                                                         break;
+                                                                     }
+                                              case SPECIAL_LD_BIGDIGIT: { // FX30* - Point I to 10-byte font sprite for digit VX (0..9)
+                                                                            if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                                I = memory.getBigDigitLocation(registers[xArgument]);
+                                                                            } else {
+                                                                                fprintf(stderr, "unsupported 0XXX instruction %04X (LD BIGF) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                                stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                            }
+                                                                            break;
+                                                                        }
+                                              case SPECIAL_LD_BCD: { // Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.  The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
+                                                                       memory.write(I + 0, registers[xArgument] / 100);
+                                                                       memory.write(I + 1, (registers[xArgument] % 100) / 10);
+                                                                       memory.write(I + 2, registers[xArgument] % 10);
+                                                                       break;
+                                                                   }
+                                              case SPECIAL_LD_IVX: { // Fx55 - LD [I], Vx - Store registers V0 through Vx in memory starting at location I.  The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.  
+                                                                       for(int i = 0; i <= xArgument; i++) {
+                                                                           memory.write(I + i, registers[i]);
+                                                                       }
+                                                                       if(!(quirks & QUIRKS_LOAD_STORE)) {
+                                                                           I = I + xArgument + 1;
+                                                                       }
+                                                                       break;
+                                                                   }
+                                              case SPECIAL_LD_VXI: { // Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.  The interpreter reads values from memory starting at location I into registers V0 through Vx.
+                                                                       for(int i = 0; i <= xArgument; i++) {
+                                                                           registers[i] = memory.read(I + i);
+                                                                       }
+                                                                       if(!(quirks & QUIRKS_LOAD_STORE)) {
+                                                                           I = I + xArgument + 1;
+                                                                       }
+                                                                       break;
+                                                                   }
+                                              case SPECIAL_STORE_RPL: {
+                                                                          if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                              for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
+                                                                                  RPL[i] = registers[i];
+                                                                              }
+                                                                          } else {
+                                                                              fprintf(stderr, "unsupported FXNN instruction %04X (STORE_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                              stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                          }
+                                                                          break;
+                                                                      }
+                                              case SPECIAL_LD_RPL: {
+                                                                       if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
+                                                                           for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
+                                                                               registers[i] = RPL[i];
+                                                                           }
+                                                                       } else {
+                                                                           fprintf(stderr, "unsupported FXNN instruction %04X (LD_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
+                                                                           stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                       }
+                                                                       break;
+                                                                   }
+                                              case SPECIAL_LD_I_16BIT: { // F000 NNNN
+                                                                           if(platform == XOCHIP) {
+                                                                               I = readU16(memory, pc + 2);
+                                                                           } else {
+                                                                               fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                                               stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                           }
+                                                                           break;
+                                                                       }
+                                              case SPECIAL_SET_PLANES: { // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
+                                                                           if(platform == XOCHIP) {
+                                                                               screenPlaneMask = xArgument;
+                                                                           } else {
+                                                                               fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                                               stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                           }
+                                                                           break;
+                                                                       }
+                                              case SPECIAL_SET_AUDIO: { // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
+                                                                          if(platform == XOCHIP) {
+                                                                              std::array<uint8_t, 16> audioSample;
+                                                                              for(int i = 0; i < 16; i++) {
+                                                                                  audioSample.at(i) = memory.read(I + i);
+                                                                              }
+                                                                              interface.loadAudio(audioSample.data());
+                                                                          } else {
+                                                                              fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" platform?\n", instructionWord);
+                                                                              stepResult = UNSUPPORTED_INSTRUCTION;
+                                                                          }
+                                                                          break;
+                                                                      }
+                                              default : {
+                                                            fprintf(stderr, "unsupported FxNN instruction %04X\n", instructionWord);
+                                                            stepResult = UNSUPPORTED_INSTRUCTION;
+                                                            break;
+                                                        }
+                                          }
+                                          break;
+                                      }
+            }
+
+            pc = nextPC;
         }
 
-        if(debug & DEBUG_ASM) {
-            uint16_t wordAfter = readU16(memory, pc + 2);
-            disassemble(pc, instructionWord, wordAfter);
+        while((DT > 0) && (DTNextDecrementClock <= systemClock)) {
+            DT--;
+            DTNextDecrementClock += systemClock.rate / 60;
         }
 
-        if(false) {
-            if(false && (insnNumber >= 43757)) {
-                for(int row = 0; row < 32; row++) {
-                    for(int col = 0; col < 64; col++) {
-                        printf("%c", interface.display.at(row * 2).at(col * 2) ? '#' : '.');
-                    }
-                    puts("");
-                }
+        while((ST > 0) && (STNextDecrementClock <= systemClock)) {
+            ST--;
+            STNextDecrementClock += systemClock.rate / 60;
+            if(ST == 0) {
+                interface.stopAudio();
             }
         }
 
-        uint16_t nextPC = pc + getInstructionSize(memory, pc);
-
-        switch(highNybble) {
-            case INSN_SYS: {
-                uint16_t sysOpcode = instructionWord & 0xFFF;
-                switch(sysOpcode) {
-                    case SYS_CLS: { // 00E0 - CLS - Clear the display.
-                        interface.clear();
-                        break;
-                    }
-                    case SYS_RET: { //  00EE - RET - Return from a subroutine.  The interpreter sets the program counter to the address at the top of the stack, then subtracts 1 from the stack pointer.
-                        nextPC = stack.back();
-                        stack.pop_back();
-                        break;
-                    }
-                    case SYS_SCROLL_RIGHT_4: { // 00FB*    Scroll display 4 pixels right
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            interface.scroll(-4, 0);
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL RIGHT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SYS_SCROLL_LEFT_4: { // 00FC*    Scroll display 4 pixels left
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            interface.scroll(4, 0);
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL ELFT 4) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SYS_EXIT: { // 00FD*    Exit CHIP interpreter
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            stepResult = EXIT_INTERPRETER;
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXIT) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SYS_EXTENDED_SCREEN: { // 00FF*    Enable extended screen mode for full-screen graphics
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            extendedScreenMode = true;
-                            interface.clear();
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (EXTENDEDSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SYS_ORIGINAL_SCREEN: { // 00FE*    Disable extended screen mode
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            extendedScreenMode = false;
-                            interface.clear();
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (ORIGINALSCREEN) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    default : { // Opcode undefined or is a range
-                        if((sysOpcode & 0xFF0) == SYS_SCROLL_UP) {
-                            // scroll-up n (0x00DN) scroll the contents of the display up by 0-15 pixels.
-                            if(platform == XOCHIP) {
-                                interface.scroll(0, imm4Argument);
-                            } else {
-                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL UP) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                                stepResult = UNSUPPORTED_INSTRUCTION;
-                            }
-                        } else if((sysOpcode & 0xFF0) == SYS_SCROLL_DOWN) {
-                            // 00CN*    Scroll display N lines down
-                            if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                                interface.scroll(0, -imm4Argument);
-                            } else {
-                                fprintf(stderr, "unsupported 0XXX instruction %04X (SCROLL DOWN) - does this ROM require \"schip\" platform?\n", instructionWord);
-                                stepResult = UNSUPPORTED_INSTRUCTION;
-                            }
-                        } else {
-                            fprintf(stderr, "%04X: unsupported 0NNN instruction %04X \n", pc, instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
-            case INSN_JP: { // 1nnn - JP addr - Jump to location nnn.  The interpreter sets the program counter to nnn.
-                nextPC = imm12Argument;
-                break;
-            }
-            case INSN_CALL: { // 2nnn - CALL addr - Call subroutine at nnn.  The interpreter increments the stack pointer, then puts the current PC on the top of the stack. The PC is then set to nnn.
-                stack.push_back(nextPC);
-                nextPC = imm12Argument;
-                break;
-            }
-            case INSN_SE_IMM: { // 3xkk - SE Vx, byte - Skip next instruction if Vx = kk.  The interpreter compares register Vx to kk, and if they are equal, increments the program counter by 2.
-                if(registers[xArgument] == imm8Argument) {
-                    nextPC = nextPC + getInstructionSize(memory, nextPC);
-                }
-                break;
-            }
-            case INSN_SNE_IMM: { // 4xkk - SNE Vx, byte - Skip next instruction if Vx != kk.  The interpreter compares register Vx to kk, and if they are not equal, increments the program counter by 2.
-                if(registers[xArgument] != imm8Argument) {
-                    nextPC = nextPC + getInstructionSize(memory, nextPC);
-                }
-                break;
-            }
-            case INSN_HIGH5: {
-                uint8_t opcode = instructionWord & 0xF;
-                switch(opcode) {
-                    case HIGH5_LD_I_VXVY : { // save vx - vy (0x5XY2) save an inclusive range of registers to memory starting at i.
-                        if(platform == XOCHIP) {
-                            if(xArgument < yArgument) {
-                                for(int i = 0; i <= yArgument - xArgument; i++) {
-                                    memory.write(I + i, registers[xArgument + i]);
-                                }
-                            } else {
-                                for(int i = 0; i <= xArgument - yArgument; i++) {
-                                    memory.write(I + i, registers[xArgument - i]);
-                                }
-                            }
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case HIGH5_LD_VXVY_I : { // load vx - vy (0x5XY3) load an inclusive range of registers from memory starting at i.
-                        if(platform == XOCHIP) {
-                            if(xArgument < yArgument) {
-                                for(int i = 0; i <= yArgument - xArgument; i++) {
-                                    registers[xArgument + i] = memory.read(I + i);
-                                }
-                            } else {
-                                for(int i = 0; i <= xArgument - yArgument; i++) {
-                                    registers[xArgument - i] = memory.read(I + i);
-                                }
-                            }
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I Vx-Vy ) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case HIGH5_SE_REG : { // 5xy0 - SE Vx, Vy - Skip next instruction if Vx = Vy.  The interpreter compares register Vx to register Vy, and if they are equal, increments the program counter by 2.
-                        if(registers[xArgument] == registers[yArgument]) {
-                            nextPC = nextPC + getInstructionSize(memory, nextPC);
-                        }
-                        break;
-                    }
-                    default : {
-                        if(opcode != 0) {
-                            fprintf(stderr, "%04X: unsupported instruction %04X\n", pc, instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                }
-                break;
-            }
-            case INSN_LD_IMM: { // 6xkk - LD Vx, byte - Set Vx = kk.  The interpreter puts the value kk into register Vx.  
-                registers[xArgument] = imm8Argument;
-                break;
-            }
-            case INSN_ADD_IMM: { // 7xkk - ADD Vx, byte - Set Vx = Vx + kk.  Adds the value kk to the value of register Vx, then stores the result in Vx.
-                registers[xArgument] = registers[xArgument] + imm8Argument;
-                break;
-            }
-            case INSN_ALU: {
-                int opcode = instructionWord & 0x000F;
-                switch(opcode) {
-                    case ALU_LD: { // 8xy0 - LD Vx, Vy - Set Vx = Vy.  Stores the value of register Vy in register Vx.  
-                        registers[xArgument] = registers[yArgument];
-                        break;
-                    }
-                    case ALU_OR: { // 8xy1 - OR Vx, Vy - Set Vx = Vx OR Vy.
-                        registers[xArgument] |= registers[yArgument];
-                        if(quirks & QUIRKS_LOGIC) {
-                            registers[0xF] = 0;
-                        }
-                        break;
-                    }
-                    case ALU_AND: { // 8xy2 - AND Vx, Vy - Set Vx = Vx AND Vy.
-                        registers[xArgument] &= registers[yArgument];
-                        if(quirks & QUIRKS_LOGIC) {
-                            registers[0xF] = 0;
-                        }
-                        break;
-                    }
-                    case ALU_XOR: { // 8xy3 - XOR Vx, Vy -  Set Vx = Vx XOR Vy.
-                        registers[xArgument] ^= registers[yArgument];
-                        if(quirks & QUIRKS_LOGIC) {
-                            registers[0xF] = 0;
-                        }
-                        break;
-                    }
-                    case ALU_ADD: { // 8xy4 - ADD Vx, Vy - Set Vx = Vx + Vy, set VF = carry.  The values of Vx and Vy are added together. If the result is greater than 8 bits (i.e., > 255,) VF is set to 1, otherwise 0. Only the lowest 8 bits of the result are kept, and stored in Vx.
-                        uint8_t result = registers[xArgument] + registers[yArgument];
-                        storeALUResult(xArgument, result, (registers[xArgument] + registers[yArgument]) > 0xFF);
-                        break;
-                    }
-                    case ALU_SUB: { // 8xy5 - SUB Vx, Vy - Set Vx = Vx - Vy, set VF = NOT borrow.  If Vx > Vy, then VF is set to 1, otherwise 0. Then Vy is subtracted from Vx, and the results stored in Vx.
-                        uint8_t result = registers[xArgument] - registers[yArgument];
-                        storeALUResult(xArgument, result, registers[xArgument] >= registers[yArgument]);
-                        break;
-                    }
-                    case ALU_SUBN: { // 8xy7 - SUBN Vx, Vy - Set Vx = Vy - Vx, set VF = NOT borrow.  If Vy > Vx, then VF is set to 1, otherwise 0. Then Vx is subtracted from Vy, and the results stored in Vx.
-                        uint8_t result = registers[yArgument] - registers[xArgument];
-                        storeALUResult(xArgument, result, registers[yArgument] >= registers[xArgument]);
-                        break;
-                    }
-                    case ALU_SHR: { // 8xy6 - SHR Vx {, Vy} - Set Vx = Vy SHR 1.  If the least-significant bit of Vy is 1, then VF is set to 1, otherwise 0. Then Vx is Vy divided by 2. (if shift.quirk, Vx = Vx SHR 1)
-                        if(quirks & QUIRKS_SHIFT) {
-                            yArgument = xArgument;
-                        }
-                        uint8_t result = registers[yArgument] / 2;
-                        storeALUResult(xArgument, result, registers[yArgument] & 0x1);
-                        break;
-                    }
-                    case ALU_SHL: { // 8xyE - SHL Vx {, Vy} - Set Vx = Vx SHL 1.  If the most-significant bit of Vy is 1, then VF is set to 1, otherwise to 0. Then Vx is Vy multiplied by 2.   (if shift.quirk, Vx = Vx SHL 1)
-                        if(quirks & QUIRKS_SHIFT) {
-                            yArgument = xArgument;
-                        }
-                        uint8_t result = registers[yArgument] * 2;
-                        storeALUResult(xArgument, result, registers[yArgument] & 0x80);
-                        break;
-                    }
-                    default : {
-                        fprintf(stderr, "%04X: unsupported 8xyN instruction %04X\n", pc, instructionWord);
-                        stepResult = UNSUPPORTED_INSTRUCTION;
-                        break;
-                    }
-                }
-                break;
-            }
-            case INSN_SNE_REG: { // 9xy0 - SNE Vx, Vy - Skip next instruction if Vx != Vy.  The values of Vx and Vy are compared, and if they are not equal, the program counter is increased by 2.  
-                if(imm4Argument != 0) {
-                    fprintf(stderr, "%04X: unsupported 9XY0 instruction %04X\n", pc, instructionWord);
-                    stepResult = UNSUPPORTED_INSTRUCTION;
-                }
-                if(registers[xArgument] != registers[yArgument]) {
-                    nextPC = nextPC + getInstructionSize(memory, nextPC);
-                }
-                break;
-            }
-            case INSN_LD_I: { // Annn - LD I, addr - Set I = nnn.  
-                I = imm12Argument;
-                break;
-            }
-            case INSN_JP_V0: { // Bnnn - JP V0, addr - Jump to location nnn + V0.
-                if(quirks & QUIRKS_JUMP) { // Ugh!
-                    nextPC = (imm12Argument & 0xFF) + registers[xArgument] + (xArgument << 8);
-                } else {
-                    nextPC = imm12Argument + registers[0];
-                }
-                break;
-            }
-            case INSN_RND: { // Cxkk - RND Vx, byte - Set Vx = random byte AND kk.  The interpreter generates a random number from 0 to 255, which is then ANDed with the value kk. The results are stored in Vx. See instruction 8xy2 for more information on AND.
-                registers[xArgument] = uniform_dist(e1) & imm8Argument;
-                break;
-            }
-            case INSN_DRW: { // Dxyn - DRW Vx, Vy, nibble
-                // Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
-                // The interpreter reads n bytes from memory, starting at the address stored in
-                // I. These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
-                // Sprites are XORed onto the existing screen. If this causes any pixels to be erased,
-                // VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of it
-                // is outside the coordinates of the display, it wraps around to the opposite side of
-                // the screen. See instruction 8xy3 for more information on XOR, and section 2.4,
-                // Display, for more information on the Chip-8 screen and sprites.
-                registers[0xF] = 0;
-                uint32_t screenWidth = extendedScreenMode ? 128 : 64;
-                uint32_t screenHeight = extendedScreenMode ? 64 : 32;
-                uint32_t pixelScale = extendedScreenMode ? 1 : 2;
-                uint16_t spriteByteAddress = I;
-                uint32_t byteCount = 1;
-                uint32_t rowCount = imm4Argument;
-                if(((platform == SCHIP_1_1) || (platform == XOCHIP)) && (imm4Argument == 0)) {
-                    // 16x16 sprite
-                    rowCount = 16;
-                    byteCount = 2;
-                }
-                for(int bitplane = 0; bitplane < 2; bitplane++) {
-                    uint8_t planeMask = 1 << bitplane;
-                    if(screenPlaneMask & planeMask) {
-                        for(uint32_t rowIndex = 0; rowIndex < rowCount; rowIndex++) {
-                            for(uint32_t byteIndex = 0; byteIndex < byteCount; byteIndex++) {
-                                uint8_t byte = memory.read(spriteByteAddress++);
-                                for(uint32_t bitIndex = 0; bitIndex < 8; bitIndex++) {
-                                    bool hasPixel = (byte >> (7 - bitIndex)) & 0x1;
-                                    uint32_t colIndex = bitIndex + byteIndex * 8;
-                                    if(quirks & QUIRKS_CLIP) {
-                                        hasPixel &= (((registers[xArgument] % screenWidth) + colIndex) < screenWidth) &&
-                                            (((registers[yArgument] % screenHeight) + rowIndex) < screenHeight);
-                                    }
-                                    if(hasPixel) {
-                                        uint32_t x = (registers[xArgument] + colIndex) % screenWidth;
-                                        uint32_t y = (registers[yArgument] + rowIndex) % screenHeight;
-                                        if(debug & DEBUG_DRAW) {
-                                            printf("draw %d %d (%d)\n", x, y, x + y * 64);
-                                        }
-                                        for(uint32_t ygrid = 0; ygrid < pixelScale; ygrid++) {
-                                            for(uint32_t xgrid = 0; xgrid < pixelScale; xgrid++) {
-                                                int x2 = x * pixelScale + xgrid;
-                                                int y2 = y * pixelScale + ygrid;
-                                                if(interface.draw(x2, y2, planeMask)) {
-                                                    registers[0xF] = 1;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            case INSN_SKP: {
-                int opcode = instructionWord & 0xFF;
-                switch(opcode) {
-                    case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
-                        if(interface.pressed(registers[xArgument])) {
-                            if(debug & DEBUG_KEYS) {
-                                printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
-                            }
-                            nextPC = nextPC + getInstructionSize(memory, nextPC);
-                        }
-                        break;
-                    }
-                    case SKNP_KEY: { // ExA1 - SKNP Vx - Skip next instruction if key with the value of Vx is not pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the up position, PC is increased by 2.
-                        if(!interface.pressed(registers[xArgument])) {
-                            nextPC = nextPC + getInstructionSize(memory, nextPC);
-                        } else {
-                            if(debug & DEBUG_KEYS) {
-                                printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
-                            }
-                        }
-                        break;
-                    }
-                    default : {
-                        fprintf(stderr, "%04X: unsupported ExNN instruction %04X\n", pc, instructionWord);
-                        stepResult = UNSUPPORTED_INSTRUCTION;
-                        break;
-                    }
-                }
-                break;
-            }
-            case INSN_LD_SPECIAL :{
-                int opcode = instructionWord & 0xFF;
-                switch(opcode) {
-                    case SPECIAL_GET_DELAY: { // Fx07 - LD Vx, DT - Set Vx = delay timer value.  The value of DT is placed into Vx.
-                        registers[xArgument] = DT;
-                        break;
-                    }
-                    case SPECIAL_KEYWAIT: { // Fx0A - LD Vx, K - Wait for a key press, store the value of the key in Vx.  All execution stops until a key is pressed, then the value of that key is stored in Vx.  
-                        if(debug & DEBUG_KEYS) {
-                            printf("waiting for key\n");
-                        }
-                        waitingForKeyPress = true;
-                        keyDestinationRegister = xArgument;
-                        break;
-                    }
-                    case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
-
-                        DT = registers[xArgument];
-                        break;
-                    }
-                    case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
-                        ST = registers[xArgument];
-                        if(ST > 0) {
-                            interface.startAudio(systemClock);
-                        }
-                        break;
-                    }
-                    case SPECIAL_ADD_INDEX: { // Fx1E - ADD I, Vx - Set I = I + Vx.  The values of I and Vx are added, and the results are stored in I.  
-                        I += registers[xArgument];
-                        break;
-                    }
-                    case SPECIAL_LD_DIGIT: { // Fx29 - LD F, Vx - Set I = location of sprite for digit Vx.  The value of I is set to the location for the hexadecimal sprite corresponding to the value of Vx. See section 2.4, Display, for more information on the Chip-8 hexadecimal font.  
-                        I = memory.getDigitLocation(registers[xArgument]);
-                        break;
-                    }
-                    case SPECIAL_LD_BIGDIGIT: { // FX30* - Point I to 10-byte font sprite for digit VX (0..9)
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            I = memory.getBigDigitLocation(registers[xArgument]);
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD BIGF) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SPECIAL_LD_BCD: { // Fx33 - LD B, Vx - Store BCD representation of Vx in memory locations I, I+1, and I+2.  The interpreter takes the decimal value of Vx, and places the hundreds digit in memory at location in I, the tens digit at location I+1, and the ones digit at location I+2.
-                        memory.write(I + 0, registers[xArgument] / 100);
-                        memory.write(I + 1, (registers[xArgument] % 100) / 10);
-                        memory.write(I + 2, registers[xArgument] % 10);
-                        break;
-                    }
-                    case SPECIAL_LD_IVX: { // Fx55 - LD [I], Vx - Store registers V0 through Vx in memory starting at location I.  The interpreter copies the values of registers V0 through Vx into memory, starting at the address in I.  
-                        for(int i = 0; i <= xArgument; i++) {
-                            memory.write(I + i, registers[i]);
-                        }
-                        if(!(quirks & QUIRKS_LOAD_STORE)) {
-                            I = I + xArgument + 1;
-                        }
-                        break;
-                    }
-                    case SPECIAL_LD_VXI: { // Fx65 - LD Vx, [I] - Read registers V0 through Vx from memory starting at location I.  The interpreter reads values from memory starting at location I into registers V0 through Vx.
-                        for(int i = 0; i <= xArgument; i++) {
-                            registers[i] = memory.read(I + i);
-                        }
-                        if(!(quirks & QUIRKS_LOAD_STORE)) {
-                            I = I + xArgument + 1;
-                        }
-                        break;
-                    }
-                    case SPECIAL_STORE_RPL: {
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
-                                RPL[i] = registers[i];
-                            }
-                        } else {
-                            fprintf(stderr, "unsupported FXNN instruction %04X (STORE_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SPECIAL_LD_RPL: {
-                        if((platform == SCHIP_1_1) || (platform == XOCHIP)) {
-                            for(int i = 0; i <= std::min((uint16_t)7, xArgument); i++) {
-                                registers[i] = RPL[i];
-                            }
-                        } else {
-                            fprintf(stderr, "unsupported FXNN instruction %04X (LD_RPL) - does this ROM require \"schip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SPECIAL_LD_I_16BIT: { // F000 NNNN
-                        if(platform == XOCHIP) {
-                            I = readU16(memory, pc + 2);
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (LD I NNNN) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SPECIAL_SET_PLANES: { // plane n (0xFN01) select zero or more drawing planes by bitmask (0 <= n <= 3).
-                        if(platform == XOCHIP) {
-                            screenPlaneMask = xArgument;
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET PLANES) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    case SPECIAL_SET_AUDIO: { // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
-                        if(platform == XOCHIP) {
-                            std::array<uint8_t, 16> audioSample;
-                            for(int i = 0; i < 16; i++) {
-                                audioSample.at(i) = memory.read(I + i);
-                            }
-                            interface.loadAudio(audioSample);
-                        } else {
-                            fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" platform?\n", instructionWord);
-                            stepResult = UNSUPPORTED_INSTRUCTION;
-                        }
-                        break;
-                    }
-                    default : {
-                        fprintf(stderr, "unsupported FxNN instruction %04X\n", instructionWord);
-                        stepResult = UNSUPPORTED_INSTRUCTION;
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-        pc = nextPC;
         return stepResult;
     }
 
@@ -829,7 +838,7 @@ struct Chip8Interpreter
     // that is to say return the least clock for which the CPU has to do some work.
     clk_t calculateNextActivity()
     {
-        return (mostRecentSystemClock.clocks + cpuClockLengthInSystemClocks - 1) / cpuClockLengthsInSystemClocks * cpuClockLengthsInSystemClocks;
+        return (mostRecentSystemClock.clocks + cpuClockLengthInSystemClocks - 1) / cpuClockLengthInSystemClocks * cpuClockLengthInSystemClocks;
     }
 
     // Do work associated with CPU clock transitioning to active, after mostRecentSystemClock and up to and including systemClock.
@@ -837,12 +846,13 @@ struct Chip8Interpreter
     StepResult updatePastClock(MEMORY& memory, INTERFACE& interface, const Clock& systemClock)
     {
         for(uint64_t clock = calculateNextActivity(); clock < systemClock; clock += cpuClockLengthInSystemClocks) {
-            StepResult result = step(memory, interface);
+            StepResult result = step(memory, interface, Clock(systemClock, clock));
             if(result != CONTINUE) {
                 return result;
             }
         }
         mostRecentSystemClock = systemClock + 1;
+        return CONTINUE;
     }
 };
 
@@ -1464,7 +1474,7 @@ struct Interface
 
     void loadAudio(const uint8_t* audioSampleSrc)
     {
-        audioSample.fill(audioSampleSrc, audioSampleSrc + 16);
+        std::copy(audioSampleSrc, audioSampleSrc + 16, std::begin(audioSample));
     }
 
     void scroll(int dx, int dy)
@@ -1648,7 +1658,7 @@ struct Interface
     // that is to say return the least clock for which the interface has to do some work.
     clk_t calculateNextActivity()
     {
-        return (mostRecentSystemClock + audioOutputSampleLengthInSystemClocks - 1) / audioOutputSampleLengthsInSystemClocks * audioOutputSampleLengthsInSystemClocks;
+        return (mostRecentSystemClock + audioOutputSampleLengthInSystemClocks - 1) / audioOutputSampleLengthInSystemClocks * audioOutputSampleLengthInSystemClocks;
     }
 
     // Do work associated with CPU clock transitioning to active, strictly after mostRecentSystemClock, up to and including systemClock.
@@ -1661,8 +1671,8 @@ struct Interface
             uint8_t sample;
             if(audioActive) {
                 int audioInputSampleIndex = ((clock - audioSampleStartClock) / audioInputSampleLengthInSystemClocks) % AOSamplingRate;
-                int byteIndex = audioSampleIndex / 8;
-                int bitIndex = audioSampleIndex % 8;
+                int byteIndex = audioInputSampleIndex / 8;
+                int bitIndex = audioInputSampleIndex % 8;
                 sample = ((audioSample[byteIndex] >> bitIndex) & 0x1) ? 255 : 0;
             } else {
                 sample = 0;
@@ -1843,15 +1853,15 @@ int main(int argc, char **argv)
 
 #ifdef XCODE_MISSING_FILESYSTEM_FOR_YEARS
     char *base = strdup(argv[0]);
-    Interface interface(basename(base), rotation, systemClock);
+    Interface interface(platform, basename(base), rotation, systemClock);
     free(base);
 #else
     std::filesystem::path base(argv[0]);
-    Interface interface(base.filename().string(), rotation, systemClock);
+    Interface interface(platform, base.filename().string(), rotation, systemClock);
 #endif
 
     if(!interface.succeeded) {
-        fprintf(stderr, "opening the display failed.\n");
+        fprintf(stderr, "opening the user interface failed.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -1872,7 +1882,7 @@ int main(int argc, char **argv)
     }
     fclose(fp);
 
-    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks, systemClock);
+    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks, ticksPerField * 60, systemClock);
 
     std::chrono::time_point<std::chrono::system_clock> interfaceThen = std::chrono::system_clock::now();
 
@@ -1888,8 +1898,8 @@ int main(int argc, char **argv)
         if(!paused) {
             uint64_t newClock = systemClock + systemClock.rate / 240; // XXX I dunno, 4 chunks of a 60Hz tick???
             while(systemClock < newClock) {
-                uint64_t nextCPU = chip8.calcNextActivity(systemClock);
-                uint64_t nextInterface = interface.calcNextActivity(systemClock);
+                uint64_t nextCPU = chip8.calculateNextActivity();
+                uint64_t nextInterface = interface.calculateNextActivity();
                 if(nextCPU < nextInterface) {
                     Chip8Interpreter<Memory,Interface>::StepResult result = chip8.updatePastClock(memory, interface, systemClock);
                     if((result == Chip8Interpreter<Memory,Interface>::UNSUPPORTED_INSTRUCTION) && (debug & DEBUG_FAIL_UNSUPPORTED_INSN)) {
