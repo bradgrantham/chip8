@@ -11,6 +11,8 @@
 #include <cstring>
 #include <chrono>
 #include <random>
+#include <numeric>
+#include <ao/ao.h>
 
 #ifdef __APPLE__
 #define XCODE_MISSING_FILESYSTEM_FOR_YEARS
@@ -20,6 +22,47 @@
 #endif
 
 #include <MiniFB.h>
+
+typedef uint64_t clk_t;
+
+struct Clock
+{
+    clk_t clocks;
+    clk_t rate;
+
+    Clock(clk_t rate) :
+        clocks(0),
+        rate(rate)
+    {}
+
+    Clock(const Clock& clock) :
+        rate(rate), 
+        clocks(clock.clocks)
+    {}
+
+    Clock(const Clock& clock, clk_t newClocks) :
+        rate(rate), 
+        clocks(newClock)
+    {}
+
+    Clock& operator=(const Clock& clock)
+    {
+        clocks = clock.clocks;
+        rate = clock.rate;
+    }
+
+    Clock& operator+=(clk_t inc)
+    {
+        clocks += inc;
+        return *this;
+    }
+
+    operator clk_t() {return clocks;}
+};
+
+constexpr int XOChipAudioSampleRate = 4000;
+constexpr int XOChipAudioSampleSamples = 128;
+constexpr int XOChipAudioSampleSize = XOChipAudioSampleSamples / 8;
 
 constexpr int DEBUG_STATE = 0x01;
 constexpr int DEBUG_ASM = 0x02;
@@ -63,7 +106,7 @@ struct Chip8Interpreter
     ChipPlatform platform;
     uint32_t quirks;
 
-    uint64_t clock = 0;
+    uint64_t insnNumber = 0;
 
     std::array<uint8_t, 16> registers = {0};
     std::array<uint8_t, 8> RPL = {0};
@@ -74,6 +117,9 @@ struct Chip8Interpreter
     uint8_t ST = 0;
     bool extendedScreenMode = false;
     uint32_t screenPlaneMask = 0x1;
+ 
+    uint64_t cpuClockLengthInSystemClocks;
+    Clock mostRecentSystemClock;
 
     std::random_device r;
     std::default_random_engine e1;
@@ -84,13 +130,16 @@ struct Chip8Interpreter
     uint8_t keyPressed;
     int keyDestinationRegister;
 
-    Chip8Interpreter(uint16_t initialPC, ChipPlatform platform, uint32_t quirks) :
+    Chip8Interpreter(uint16_t initialPC, ChipPlatform platform, uint32_t quirks, uint64_t cpuClockRate, const Clock& systemClock) :
         platform(platform),
         quirks(quirks),
         pc(initialPC),
+        mostRecentSystemClock(systemClock),
         e1(r()),
         uniform_dist(0, 255)
     {
+        assert(systemClock.rate % cpuClockRate == 0);
+        cpuClockLengthInSystemClocks = systemClock.rate / cpuClockRate;
     }
 
     void tick(INTERFACE& interface)
@@ -101,7 +150,7 @@ struct Chip8Interpreter
         if(ST > 0) {
             ST--;
             if(ST == 0) {
-                interface.stopSound();
+                interface.stopAudio();
             }
         }
     }
@@ -219,7 +268,7 @@ struct Chip8Interpreter
         }
     }
 
-    StepResult step(MEMORY& memory, INTERFACE& interface)
+    StepResult step(MEMORY& memory, INTERFACE& interface, const Clock& systemClock)
     {
         StepResult stepResult = CONTINUE;
         uint16_t instructionWord = readU16(memory, pc);
@@ -269,7 +318,7 @@ struct Chip8Interpreter
         }
 
         if(debug & DEBUG_STATE) {
-            printf("CHIP8: clk:%llu pc:%04X I:%04X ", clock++, pc, I);
+            printf("CHIP8: clk:%llu pc:%04X I:%04X ", insnNumber++, pc, I);
             for(int i = 0; i < 16; i++) {
                 printf("%02X ", registers[i]);
             }
@@ -282,7 +331,7 @@ struct Chip8Interpreter
         }
 
         if(false) {
-            if(false && (clock >= 43757)) {
+            if(false && (insnNumber >= 43757)) {
                 for(int row = 0; row < 32; row++) {
                     for(int col = 0; col < 64; col++) {
                         printf("%c", interface.display.at(row * 2).at(col * 2) ? '#' : '.');
@@ -618,7 +667,7 @@ struct Chip8Interpreter
                     case SKP_KEY: { // Ex9E - SKP Vx - Skip next instruction if key with the value of Vx is pressed.  Checks the keyboard, and if the key corresponding to the value of Vx is currently in the down position, PC is increased by 2.
                         if(interface.pressed(registers[xArgument])) {
                             if(debug & DEBUG_KEYS) {
-                                printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                                printf("clock %llu, pc %04X, SKP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
                             }
                             nextPC = nextPC + getInstructionSize(memory, nextPC);
                         }
@@ -629,7 +678,7 @@ struct Chip8Interpreter
                             nextPC = nextPC + getInstructionSize(memory, nextPC);
                         } else {
                             if(debug & DEBUG_KEYS) {
-                                printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", clock, pc, registers[xArgument]);
+                                printf("clock %llu, pc %04X, SKNP_KEY, key %d pressed\n", insnNumber, pc, registers[xArgument]);
                             }
                         }
                         break;
@@ -665,7 +714,7 @@ struct Chip8Interpreter
                     case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
                         ST = registers[xArgument];
                         if(ST > 0) {
-                            interface.startSound();
+                            interface.startAudio(systemClock);
                         }
                         break;
                     }
@@ -752,7 +801,11 @@ struct Chip8Interpreter
                     }
                     case SPECIAL_SET_AUDIO: { // audio (0xF002) store 16 bytes starting at i in the audio pattern buffer. 
                         if(platform == XOCHIP) {
-                            // XXX TBD
+                            std::array<uint8_t, 16> audioSample;
+                            for(int i = 0; i < 16; i++) {
+                                audioSample.at(i) = memory.read(I + i);
+                            }
+                            interface.loadAudio(audioSample);
                         } else {
                             fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" platform?\n", instructionWord);
                             stepResult = UNSUPPORTED_INSTRUCTION;
@@ -770,6 +823,26 @@ struct Chip8Interpreter
         }
         pc = nextPC;
         return stepResult;
+    }
+
+    // Return the next system clock tick at which the CPU will have transitioned one CPU clock,
+    // that is to say return the least clock for which the CPU has to do some work.
+    clk_t calculateNextActivity()
+    {
+        return (mostRecentSystemClock.clocks + cpuClockLengthInSystemClocks - 1) / cpuClockLengthsInSystemClocks * cpuClockLengthsInSystemClocks;
+    }
+
+    // Do work associated with CPU clock transitioning to active, after mostRecentSystemClock and up to and including systemClock.
+    // Do not repeat work if called twice with same clock.
+    StepResult updatePastClock(MEMORY& memory, INTERFACE& interface, const Clock& systemClock)
+    {
+        for(uint64_t clock = calculateNextActivity(); clock < systemClock; clock += cpuClockLengthInSystemClocks) {
+            StepResult result = step(memory, interface);
+            if(result != CONTINUE) {
+                return result;
+            }
+        }
+        mostRecentSystemClock = systemClock + 1;
     }
 };
 
@@ -1260,16 +1333,68 @@ vec3ub vec3ubFromInts(int r, int g, int b)
     return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
 }
 
+void enqueueAudioSamples(ao_device *aodev, uint8_t *buf, size_t sz)
+{
+    ao_play(aodev, (char*)buf, sz);
+}
+
+constexpr int AOSamplingRate = 44100;
+
+ao_device *open_ao()
+{
+    ao_device *device;
+    ao_sample_format format;
+    int default_driver;
+
+    ao_initialize();
+
+    default_driver = ao_default_driver_id();
+
+    memset(&format, 0, sizeof(format));
+    format.bits = 8;
+    format.channels = 1;
+    format.rate = AOSamplingRate;
+    format.byte_format = AO_FMT_LITTLE;
+
+    /* -- Open driver -- */
+    device = ao_open_live(default_driver, &format, NULL /* no options */);
+    if (device == NULL) {
+        fprintf(stderr, "Error opening libao audio device.\n");
+        return nullptr;
+    }
+    return device;
+}
+
 struct Interface
 {
+    ChipPlatform platform;
     std::array<std::array<uint8_t, 128>, 64> display;
     std::array<vec3ub, 256> colorTable;
+    std::array<uint8_t, XOChipAudioSampleSize> audioSample;
+    uint64_t audioInputSampleLengthInSystemClocks;
     bool displayChanged = true;
     bool closed = false;
     std::array<bool, 16> keyPressed;
+    bool aKeyWasPressed = false;
     DisplayRotation rotation;
 
+    Clock mostRecentSystemClock;
+    Clock audioSampleStartClock;
+    bool audioActive = false;
+
     bool succeeded = false;
+
+    mfb_window *window;
+    int windowWidth;
+    int windowHeight;
+    uint32_t* windowBuffer;
+
+    ao_device *aodev;
+    static constexpr size_t audioOutputBufferSize = AOSamplingRate / 100;
+    uint8_t audioOutputBuffer[audioOutputBufferSize];
+    uint64_t previousAudioOutputSample = std::numeric_limits<uint64_t>::max();
+    uint64_t nextBufferSample = 0;
+    uint64_t audioOutputSampleLengthInSystemClocks;
 
     static int initialScaleFactor(DisplayRotation rotation) {
         switch(rotation) {
@@ -1280,34 +1405,66 @@ struct Interface
         }
     }
 
-    mfb_window *window;
-    int windowWidth;
-    int windowHeight;
-    uint32_t* windowBuffer;
-
-    Interface(const std::string& name, DisplayRotation rotation) :
+    Interface(ChipPlatform platform, const std::string& name, DisplayRotation rotation, const Clock& systemClock) :
+        platform(platform),
         rotation(rotation),
         windowWidth((((rotation == ROT_0) || (rotation == ROT_180)) ? 128 : 64) * initialScaleFactor(rotation)),
-        windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation))
+        windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation)),
+        mostRecentSystemClock(systemClock),
+        audioSampleStartClock(systemClock)
     {
+        window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
+        if (!window) {
+            fprintf(stderr, "Interface: Error opening window.\n");
+            return;
+        }
+
+        aodev = open_ao();
+        if(aodev == NULL) {
+            fprintf(stderr, "Interface: Error opening audio.\n");
+            return;
+        }
+
+        windowBuffer = new uint32_t[windowWidth * windowHeight];
+        mfb_set_user_data(window, (void *) this);
+        mfb_set_resize_callback(window, resizecb);
+        mfb_set_keyboard_callback(window, keyboardcb);
+
         keyPressed.fill(false);
 
         colorTable.fill({0,0,0});
-        colorTable[0] = {0, 0, 0};
-        colorTable[1] = {255, 255, 255};
+        colorTable[0] = {153, 102, 0};
+        colorTable[1] = {255, 204, 0}; 
         colorTable[2] = {170, 170, 170};
         colorTable[3] = {85, 85, 85};
 
         clear();
 
-        window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
-        if (window) {
-            windowBuffer = new uint32_t[windowWidth * windowHeight];
-            mfb_set_user_data(window, (void *) this);
-            mfb_set_resize_callback(window, resizecb);
-            mfb_set_keyboard_callback(window, keyboardcb);
-            succeeded = true;
+	// XXX is this correct?  John's spec says it but feels like
+	// an error.  Do all XOCHIP variants always set buffer before
+	// calling audio?
+	audioSample.fill(0);
+
+        if(platform != XOCHIP) {
+            // 500 Hz
+            audioSample[0] = 0xff;
+            audioSample[2] = 0xff;
+            audioSample[4] = 0xff;
+            audioSample[6] = 0xff;
+            audioSample[8] = 0xff;
+            audioSample[10] = 0xff;
+            audioSample[12] = 0xff;
+            audioSample[14] = 0xff;
         }
+
+        audioOutputSampleLengthInSystemClocks = systemClock.rate / AOSamplingRate;
+
+        succeeded = true;
+    }
+
+    void loadAudio(const uint8_t* audioSampleSrc)
+    {
+        audioSample.fill(audioSampleSrc, audioSampleSrc + 16);
     }
 
     void scroll(int dx, int dy)
@@ -1408,6 +1565,7 @@ struct Interface
             case KB_KEY_V: keyPressed[0xF] = isPressed; break;
             default: /* pass */ break;
         }
+        aKeyWasPressed |= isPressed;
     }
 
     static void keyboardcb(mfb_window *window, mfb_key key, mfb_key_mod mod, bool isPressed)
@@ -1431,18 +1589,27 @@ struct Interface
         return success && !closed;
     }
 
-    void startSound()
+    void startAudio(const Clock& clk)
     {
-        printf("sound\n");
+        audioSampleStartClock = clk;
+        audioActive = true;
     }
 
-    void stopSound()
+    void stopAudio()
     {
+        audioActive = false;
     }
 
     bool pressed(uint8_t key)
     {
         return keyPressed[key];
+    }
+
+    bool anyKeyPressed()
+    {
+        bool wasPressed = aKeyWasPressed;
+        aKeyWasPressed = false;
+        return wasPressed;
     }
 
     bool draw(uint8_t x, uint8_t y, uint8_t planeMask)
@@ -1476,6 +1643,41 @@ struct Interface
             }
         }
     }
+
+    // Return the next system clock tick at which the interface will have transitioned one interface clock,
+    // that is to say return the least clock for which the interface has to do some work.
+    clk_t calculateNextActivity()
+    {
+        return (mostRecentSystemClock + audioOutputSampleLengthInSystemClocks - 1) / audioOutputSampleLengthsInSystemClocks * audioOutputSampleLengthsInSystemClocks;
+    }
+
+    // Do work associated with CPU clock transitioning to active, strictly after mostRecentSystemClock, up to and including systemClock.
+    // Do not repeat work if called twice with same clock.
+    void updatePastClock(const Clock& systemClock)
+    {
+        for(uint64_t clock = calculateNextActivity(); clock < systemClock; clock += audioOutputSampleLengthInSystemClocks) {
+            // determine output sample index
+            int audioOutputSampleIndex = (clock / audioOutputSampleLengthInSystemClocks) % AOSamplingRate;
+            uint8_t sample;
+            if(audioActive) {
+                int audioInputSampleIndex = ((clock - audioSampleStartClock) / audioInputSampleLengthInSystemClocks) % AOSamplingRate;
+                int byteIndex = audioSampleIndex / 8;
+                int bitIndex = audioSampleIndex % 8;
+                sample = ((audioSample[byteIndex] >> bitIndex) & 0x1) ? 255 : 0;
+            } else {
+                sample = 0;
+            }
+            audioOutputBuffer[audioOutputSampleIndex] = sample;
+            if(audioOutputSampleIndex == audioOutputBufferSize - 1) {
+                enqueueAudioSamples(aodev, audioOutputBuffer, audioOutputBufferSize);
+                audioOutputSampleIndex = 0;
+            } else {
+                audioOutputSampleIndex++;
+            }
+        }
+        mostRecentSystemClock = systemClock + 1;
+    }
+
 };
 
 void usage(const char *name)
@@ -1485,11 +1687,21 @@ void usage(const char *name)
     fprintf(stderr, "\t--rate N           - issue N instructions per 60Hz field\n");
     fprintf(stderr, "\t--color N RRGGBB   - set color N to RRGGBB\n");
     fprintf(stderr, "\t--platform name    - enable platform, \"schip\" or \"xochip\"\n");
+    fprintf(stderr, "\t--wait             - wait for a keypress before starting simulation\n");
+    fprintf(stderr, "\t--rot amount       - emulate rotating the screen; amount may be 0, 90, 180, or 270\n");
     fprintf(stderr, "\t--quirk name       - enable SCHIP quirk\n");
     fprintf(stderr, "\t                     \"jump\" : bits 11-8 of BNNN are also register number\n");
     fprintf(stderr, "\t                     \"shift\" : shift operates on Vx, not Vy\n");
     fprintf(stderr, "\t                     \"clip\" : sprites are not wrapped of sprites\n");
     fprintf(stderr, "\t                     \"loadstore\" : multi-register Vx load/store doesn't change I \n");
+    fprintf(stderr, "\t                     \"vforder\" : assign flag to VF before storing ALU result\n");
+    fprintf(stderr, "\t                     \"logic\" : clear VF at the end of logic ALU operations\n");
+    fprintf(stderr, "\t--debug name       - enable debugging flag by name\n");
+    fprintf(stderr, "\t                     \"state\" : dump the state of the CPU before each instruction\n");
+    fprintf(stderr, "\t                     \"asm\" : disassemble each instruction\n");
+    fprintf(stderr, "\t                     \"draw\" : print sprite draw coordinates\n");
+    fprintf(stderr, "\t                     \"insn\" : stop execution on unsupported instruction\n");
+    fprintf(stderr, "\t                     \"keys\" : dump some debugging information about keypresses\n");
 }
 
 std::map<std::string, uint32_t> keywordsToQuirkValues = {
@@ -1499,13 +1711,6 @@ std::map<std::string, uint32_t> keywordsToQuirkValues = {
     {"clip", QUIRKS_CLIP},
     {"vforder", QUIRKS_VFORDER},
     {"logic", QUIRKS_LOGIC},
-};
-
-std::map<std::string, DisplayRotation> keywordsToRotationValues = {
-    {"rot0", ROT_0},
-    {"rot90", ROT_90},
-    {"rot180", ROT_180},
-    {"rot270", ROT_270},
 };
 
 int main(int argc, char **argv)
@@ -1519,6 +1724,7 @@ int main(int argc, char **argv)
     DisplayRotation rotation = ROT_0;
     uint32_t quirks = QUIRKS_NONE;
     std::map<int,vec3ub> colorTable;
+    bool paused = false;
 
     while((argc > 0) && (argv[0][0] == '-')) {
 	if(strcmp(argv[0], "--color") == 0) {
@@ -1601,6 +1807,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "debug value now 0x%02X\n", debug);
             argv += 2;
             argc -= 2;
+        } else if(strcmp(argv[0], "--wait") == 0) {
+            paused = true;
+            argv += 1;
+            argc -= 1;
         } else if(strcmp(argv[0], "--rate") == 0) {
             if(argc < 2) {
                 fprintf(stderr, "--rate option requires a rate number value.\n");
@@ -1629,13 +1839,15 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
+    Clock systemClock(std::lcm(AOSamplingRate, ticksPerField * 60));
+
 #ifdef XCODE_MISSING_FILESYSTEM_FOR_YEARS
     char *base = strdup(argv[0]);
-    Interface interface(basename(base), rotation);
+    Interface interface(basename(base), rotation, systemClock);
     free(base);
 #else
     std::filesystem::path base(argv[0]);
-    Interface interface(base.filename().string(), rotation);
+    Interface interface(base.filename().string(), rotation, systemClock);
 #endif
 
     if(!interface.succeeded) {
@@ -1660,31 +1872,44 @@ int main(int argc, char **argv)
     }
     fclose(fp);
 
-    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks);
+    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks, systemClock);
 
     std::chrono::time_point<std::chrono::system_clock> interfaceThen = std::chrono::system_clock::now();
 
     bool done = false;
     while(!done) {
 
-        for(int i = 0; i < ticksPerField; i++) {
-            Chip8Interpreter<Memory,Interface>::StepResult result = chip8.step(memory, interface);
-            if((result == Chip8Interpreter<Memory,Interface>::UNSUPPORTED_INSTRUCTION) && (debug & DEBUG_FAIL_UNSUPPORTED_INSN)) {
-                printf("exit on unsupported instruction\n");
-                exit(EXIT_FAILURE);
+        if(paused) {
+            if(interface.anyKeyPressed()) {
+                paused = false;
             }
         }
 
-        std::chrono::time_point<std::chrono::system_clock> interfaceNow;
-        float dt;
-        do { 
-            interfaceNow = std::chrono::system_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(interfaceNow - interfaceThen);
-            dt = elapsed.count();
-        } while(dt < .0166f);
+        if(!paused) {
+            uint64_t newClock = systemClock + systemClock.rate / 240; // XXX I dunno, 4 chunks of a 60Hz tick???
+            while(systemClock < newClock) {
+                uint64_t nextCPU = chip8.calcNextActivity(systemClock);
+                uint64_t nextInterface = interface.calcNextActivity(systemClock);
+                if(nextCPU < nextInterface) {
+                    Chip8Interpreter<Memory,Interface>::StepResult result = chip8.updatePastClock(memory, interface, systemClock);
+                    if((result == Chip8Interpreter<Memory,Interface>::UNSUPPORTED_INSTRUCTION) && (debug & DEBUG_FAIL_UNSUPPORTED_INSN)) {
+                        printf("exit on unsupported instruction\n");
+                        exit(EXIT_FAILURE);
+                    }
+                    systemClock = nextCPU;
+                } else {
+                    interface.updatePastClock(systemClock);
+                    systemClock = nextInterface;
+                }
+            }
+        }
 
-        done = !interface.iterate();
-        chip8.tick(interface);
-        interfaceThen = interfaceNow;
+        std::chrono::time_point<std::chrono::system_clock> interfaceNow = std::chrono::system_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(interfaceNow - interfaceThen);
+        float dt = elapsed.count();
+        if(dt > 0.16f) {
+            done = !interface.iterate();
+            interfaceThen = interfaceNow;
+        }
     }
 }
