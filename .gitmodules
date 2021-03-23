@@ -1,6 +1,6 @@
 [submodule "lib/minifb"]
 	path = lib/minifb
-	url = https://github.com/emoon/minifb
+	url = https://github.com/bradgrantham/minifb
         shallow = true
 [submodule "chip8Archive"]
 	path = chip8Archive
