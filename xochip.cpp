@@ -1480,7 +1480,6 @@ struct Interface
 
         audioOutputSampleLengthInSystemClocks = systemClock.rate / AOSamplingRate;
         audioInputSampleLengthInSystemClocks = systemClock.rate / XOChipAudioSampleRate;
-        printf("audio input length %llu, system clock %llu\n", audioInputSampleLengthInSystemClocks, systemClock.rate);
 
         succeeded = true;
     }
