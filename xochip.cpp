@@ -27,12 +27,12 @@ typedef uint64_t clk_t;
 
 struct Clock
 {
-    clk_t clocks;
     clk_t rate;
+    clk_t clocks;
 
     Clock(clk_t rate) :
-        clocks(0),
-        rate(rate)
+        rate(rate),
+        clocks(0)
     {}
 
     Clock(const Clock& clock) :
@@ -58,8 +58,17 @@ struct Clock
         return *this;
     }
 
-    operator clk_t() const { return clocks; }
+    Clock operator+(clk_t inc) const
+    {
+        return Clock(rate, clocks + inc);
+    }
+
+    // operator clk_t() const { return clocks; }
 };
+
+constexpr int FieldsPerSecond = 60;
+constexpr int Chip8TimerFrequency = 60;
+constexpr int UIUpdateFrequency = 30;
 
 constexpr int XOChipAudioSampleRate = 4000;
 constexpr int XOChipAudioSampleSamples = 128;
@@ -115,9 +124,9 @@ struct Chip8Interpreter
     uint16_t I = 0;
     uint16_t pc = 0;
     uint8_t DT = 0;
-    uint64_t DTNextDecrementClock;
+    uint64_t DTNextDecrementClock = 0;
     uint8_t ST = 0;
-    uint64_t STNextDecrementClock;
+    uint64_t STNextDecrementClock = 0;
     bool extendedScreenMode = false;
     uint32_t screenPlaneMask = 0x1;
  
@@ -700,7 +709,7 @@ struct Chip8Interpreter
                                               case SPECIAL_SET_DELAY: { // Fx15 - LD DT, Vx - Set delay timer = Vx.  DT is set equal to the value of Vx.
 
                                                                           DT = registers[xArgument];
-                                                                          DTNextDecrementClock = systemClock.clocks + systemClock.rate / 60;
+                                                                          DTNextDecrementClock = systemClock.clocks + systemClock.rate / Chip8TimerFrequency;
                                                                           break;
                                                                       }
                                               case SPECIAL_SET_SOUND: { // Fx18 - LD ST, Vx - Set sound timer = Vx.  ST is set equal to the value of Vx.  
@@ -708,7 +717,7 @@ struct Chip8Interpreter
                                                                           if(ST > 0) {
                                                                               interface.startAudio(systemClock);
                                                                           }
-                                                                          STNextDecrementClock = systemClock.clocks + systemClock.rate / 60;
+                                                                          STNextDecrementClock = systemClock.clocks + systemClock.rate / Chip8TimerFrequency;
                                                                           break;
                                                                       }
                                               case SPECIAL_ADD_INDEX: { // Fx1E - ADD I, Vx - Set I = I + Vx.  The values of I and Vx are added, and the results are stored in I.  
@@ -818,14 +827,14 @@ struct Chip8Interpreter
             pc = nextPC;
         }
 
-        while((DT > 0) && (DTNextDecrementClock <= systemClock)) {
+        while((DT > 0) && (DTNextDecrementClock <= systemClock.clocks)) {
             DT--;
-            DTNextDecrementClock += systemClock.rate / 60;
+            DTNextDecrementClock += systemClock.rate / Chip8TimerFrequency;
         }
 
-        while((ST > 0) && (STNextDecrementClock <= systemClock)) {
+        while((ST > 0) && (STNextDecrementClock <= systemClock.clocks)) {
             ST--;
-            STNextDecrementClock += systemClock.rate / 60;
+            STNextDecrementClock += systemClock.rate / Chip8TimerFrequency;
             if(ST == 0) {
                 interface.stopAudio();
             }
@@ -838,20 +847,23 @@ struct Chip8Interpreter
     // that is to say return the least clock for which the CPU has to do some work.
     clk_t calculateNextActivity()
     {
-        return (mostRecentSystemClock.clocks + cpuClockLengthInSystemClocks - 1) / cpuClockLengthInSystemClocks * cpuClockLengthInSystemClocks;
+        clk_t next = (mostRecentSystemClock.clocks + cpuClockLengthInSystemClocks - 1) / cpuClockLengthInSystemClocks * cpuClockLengthInSystemClocks;
+        // XXX debug printf("CPU next is %llu\n", next);
+        return next;
     }
 
     // Do work associated with CPU clock transitioning to active, after mostRecentSystemClock and up to and including systemClock.
     // Do not repeat work if called twice with same clock.
     StepResult updatePastClock(MEMORY& memory, INTERFACE& interface, const Clock& systemClock)
     {
-        for(uint64_t clock = calculateNextActivity(); clock < systemClock; clock += cpuClockLengthInSystemClocks) {
+        for(uint64_t clock = calculateNextActivity(); clock <= systemClock.clocks; clock += cpuClockLengthInSystemClocks) {
             StepResult result = step(memory, interface, Clock(systemClock, clock));
             if(result != CONTINUE) {
                 return result;
             }
         }
         mostRecentSystemClock = systemClock + 1;
+        // XXX debug printf("systemClock is %llu, most recent is now %llu\n", systemClock.clocks, mostRecentSystemClock.clocks);
         return CONTINUE;
     }
 };
@@ -1400,7 +1412,7 @@ struct Interface
     uint32_t* windowBuffer;
 
     ao_device *aodev;
-    static constexpr size_t audioOutputBufferSize = AOSamplingRate / 100;
+    static constexpr size_t audioOutputBufferSize = AOSamplingRate / 60;
     uint8_t audioOutputBuffer[audioOutputBufferSize];
     uint64_t previousAudioOutputSample = std::numeric_limits<uint64_t>::max();
     uint64_t nextBufferSample = 0;
@@ -1418,10 +1430,10 @@ struct Interface
     Interface(ChipPlatform platform, const std::string& name, DisplayRotation rotation, const Clock& systemClock) :
         platform(platform),
         rotation(rotation),
-        windowWidth((((rotation == ROT_0) || (rotation == ROT_180)) ? 128 : 64) * initialScaleFactor(rotation)),
-        windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation)),
         mostRecentSystemClock(systemClock),
-        audioSampleStartClock(systemClock)
+        audioSampleStartClock(systemClock.clocks),
+        windowWidth((((rotation == ROT_0) || (rotation == ROT_180)) ? 128 : 64) * initialScaleFactor(rotation)),
+        windowHeight((((rotation == ROT_0) || (rotation == ROT_180)) ? 64 : 128) * initialScaleFactor(rotation))
     {
         window = mfb_open_ex(name.c_str(), windowWidth, windowHeight, WF_RESIZABLE);
         if (!window) {
@@ -1456,7 +1468,6 @@ struct Interface
 	audioSample.fill(0);
 
         if(platform != XOCHIP) {
-            // 500 Hz
             audioSample[0] = 0xff;
             audioSample[2] = 0xff;
             audioSample[4] = 0xff;
@@ -1468,6 +1479,8 @@ struct Interface
         }
 
         audioOutputSampleLengthInSystemClocks = systemClock.rate / AOSamplingRate;
+        audioInputSampleLengthInSystemClocks = systemClock.rate / XOChipAudioSampleRate;
+        printf("audio input length %llu, system clock %llu\n", audioInputSampleLengthInSystemClocks, systemClock.rate);
 
         succeeded = true;
     }
@@ -1593,9 +1606,6 @@ struct Interface
         } else {
             success = (mfb_update_events(window) >= 0);
         }
-        if(success) {
-            mfb_wait_sync(window);
-        }
         return success && !closed;
     }
 
@@ -1658,34 +1668,41 @@ struct Interface
     // that is to say return the least clock for which the interface has to do some work.
     clk_t calculateNextActivity()
     {
-        return (mostRecentSystemClock + audioOutputSampleLengthInSystemClocks - 1) / audioOutputSampleLengthInSystemClocks * audioOutputSampleLengthInSystemClocks;
+        clk_t next = (mostRecentSystemClock.clocks + audioOutputSampleLengthInSystemClocks - 1) / audioOutputSampleLengthInSystemClocks * audioOutputSampleLengthInSystemClocks;
+        // XXX debug printf("interface next is %llu\n", next);
+        return next;
     }
 
     // Do work associated with CPU clock transitioning to active, strictly after mostRecentSystemClock, up to and including systemClock.
     // Do not repeat work if called twice with same clock.
     void updatePastClock(const Clock& systemClock)
     {
-        for(uint64_t clock = calculateNextActivity(); clock < systemClock; clock += audioOutputSampleLengthInSystemClocks) {
+        // XXX debug printf("audio loop\n");
+        for(uint64_t clock = calculateNextActivity(); clock <= systemClock.clocks; clock += audioOutputSampleLengthInSystemClocks) {
             // determine output sample index
-            int audioOutputSampleIndex = (clock / audioOutputSampleLengthInSystemClocks) % AOSamplingRate;
+            int audioOutputSampleIndex = (clock / audioOutputSampleLengthInSystemClocks) % audioOutputBufferSize;
+            static int prev = 0;
+            if(audioOutputSampleIndex != (prev + 1) % audioOutputBufferSize) {
+                printf("uh oh %d %d\n", prev, audioOutputSampleIndex);
+            }
+            prev = audioOutputSampleIndex;
+            // XXX debug printf("system clock = %llu, audio clock = %llu, sampleIndex = %d\n", systemClock.clocks, clock, audioOutputSampleIndex);
             uint8_t sample;
             if(audioActive) {
-                int audioInputSampleIndex = ((clock - audioSampleStartClock) / audioInputSampleLengthInSystemClocks) % AOSamplingRate;
+                int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) % AOSamplingRate;
                 int byteIndex = audioInputSampleIndex / 8;
                 int bitIndex = audioInputSampleIndex % 8;
-                sample = ((audioSample[byteIndex] >> bitIndex) & 0x1) ? 255 : 0;
+                sample = ((audioSample[byteIndex] >> bitIndex) & 0x1) ? (127 - 16) : (127 + 16);
             } else {
-                sample = 0;
+                sample = 128;
             }
             audioOutputBuffer[audioOutputSampleIndex] = sample;
             if(audioOutputSampleIndex == audioOutputBufferSize - 1) {
                 enqueueAudioSamples(aodev, audioOutputBuffer, audioOutputBufferSize);
-                audioOutputSampleIndex = 0;
-            } else {
-                audioOutputSampleIndex++;
             }
         }
         mostRecentSystemClock = systemClock + 1;
+        // XXX debug printf("systemClock is %llu, most recent is now %llu\n", systemClock.clocks, mostRecentSystemClock.clocks);
     }
 
 };
@@ -1849,7 +1866,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    Clock systemClock(std::lcm(AOSamplingRate, ticksPerField * 60));
+    Clock systemClock(std::lcm(AOSamplingRate, ticksPerField * FieldsPerSecond));
 
 #ifdef XCODE_MISSING_FILESYSTEM_FOR_YEARS
     char *base = strdup(argv[0]);
@@ -1882,7 +1899,8 @@ int main(int argc, char **argv)
     }
     fclose(fp);
 
-    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks, ticksPerField * 60, systemClock);
+    const int cpuClockRate = ticksPerField * FieldsPerSecond;
+    Chip8Interpreter<Memory,Interface> chip8(0x200, platform, quirks, cpuClockRate, systemClock);
 
     std::chrono::time_point<std::chrono::system_clock> interfaceThen = std::chrono::system_clock::now();
 
@@ -1896,20 +1914,23 @@ int main(int argc, char **argv)
         }
 
         if(!paused) {
-            uint64_t newClock = systemClock + systemClock.rate / 240; // XXX I dunno, 4 chunks of a 60Hz tick???
-            while(systemClock < newClock) {
+            uint64_t newClock = systemClock.clocks + systemClock.rate / 240; // XXX I dunno, 4 chunks of a 60Hz tick???
+            while(systemClock.clocks < newClock) {
                 uint64_t nextCPU = chip8.calculateNextActivity();
                 uint64_t nextInterface = interface.calculateNextActivity();
+                // XXX debug printf("cpu : %llu, interface: %llu\n", nextCPU, nextInterface);
                 if(nextCPU < nextInterface) {
+                    // XXX debug printf("do cpu\n");
                     Chip8Interpreter<Memory,Interface>::StepResult result = chip8.updatePastClock(memory, interface, systemClock);
                     if((result == Chip8Interpreter<Memory,Interface>::UNSUPPORTED_INSTRUCTION) && (debug & DEBUG_FAIL_UNSUPPORTED_INSN)) {
-                        printf("exit on unsupported instruction\n");
+                        // XXX debug printf("exit on unsupported instruction\n");
                         exit(EXIT_FAILURE);
                     }
-                    systemClock = nextCPU;
+                    systemClock.clocks = nextCPU;
                 } else {
+                    // XXX debug printf("do interface\n");
                     interface.updatePastClock(systemClock);
-                    systemClock = nextInterface;
+                    systemClock.clocks = nextInterface;
                 }
             }
         }
@@ -1917,7 +1938,7 @@ int main(int argc, char **argv)
         std::chrono::time_point<std::chrono::system_clock> interfaceNow = std::chrono::system_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::duration<float>>(interfaceNow - interfaceThen);
         float dt = elapsed.count();
-        if(dt > 0.16f) {
+        if(dt > (.9f * 1.0f / UIUpdateFrequency)) {
             done = !interface.iterate();
             interfaceThen = interfaceNow;
         }
