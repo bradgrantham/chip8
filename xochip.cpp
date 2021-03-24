@@ -807,7 +807,7 @@ struct Chip8Interpreter
                                                                               for(int i = 0; i < 16; i++) {
                                                                                   audioSample.at(i) = memory.read(I + i);
                                                                               }
-                                                                              interface.loadAudio(audioSample.data());
+                                                                              interface.loadAudio(audioSample.data(), systemClock);
                                                                           } else {
                                                                               fprintf(stderr, "unsupported 0XXX instruction %04X (SET AUDIO) - does this ROM require \"xochip\" platform?\n", instructionWord);
                                                                               stepResult = UNSUPPORTED_INSTRUCTION;
@@ -1387,6 +1387,19 @@ ao_device *open_ao()
     return device;
 }
 
+
+// XXX In support of debugging
+static unsigned char blob[300000];
+static size_t blobsize;
+void loadblob() __attribute__((constructor));
+void loadblob() 
+{
+    FILE *fp = fopen("blob.44k", "rb");
+    assert(fp);
+    blobsize = fread(blob, 1, sizeof(blob), fp);
+    fclose(fp);
+}
+
 struct Interface
 {
     ChipPlatform platform;
@@ -1447,6 +1460,13 @@ struct Interface
             return;
         }
 
+        // XXX debug
+#if 0
+        for(size_t b = 0; b < blobsize; b += 441) {
+            enqueueAudioSamples(aodev, blob + b, 441);
+        }
+#endif
+
         windowBuffer = new uint32_t[windowWidth * windowHeight];
         mfb_set_user_data(window, (void *) this);
         mfb_set_resize_callback(window, resizecb);
@@ -1484,9 +1504,10 @@ struct Interface
         succeeded = true;
     }
 
-    void loadAudio(const uint8_t* audioSampleSrc)
+    void loadAudio(const uint8_t* audioSampleSrc, const Clock& clk)
     {
         std::copy(audioSampleSrc, audioSampleSrc + 16, std::begin(audioSample));
+        audioSampleStartClock = clk;
     }
 
     void scroll(int dx, int dy)
@@ -1688,14 +1709,20 @@ struct Interface
             // XXX debug printf("system clock = %llu, audio clock = %llu, sampleIndex = %d\n", systemClock.clocks, clock, audioOutputSampleIndex);
             uint8_t sample;
             if(audioActive) {
-                int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) % AOSamplingRate;
+                int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) % XOChipAudioSampleRate;
+                printf("audioInputSampleIndex = %d\n", audioInputSampleIndex);
                 int byteIndex = audioInputSampleIndex / 8;
                 int bitIndex = audioInputSampleIndex % 8;
-                sample = ((audioSample[byteIndex] >> bitIndex) & 0x1) ? (127 - 16) : (127 + 16);
+                sample = ((audioSample[byteIndex] << bitIndex) & 0x80) ? (127 - 16) : (127 + 16);
             } else {
-                sample = 128;
+                sample = 127;
             }
             audioOutputBuffer[audioOutputSampleIndex] = sample;
+            if(false) { /* XXX debugging */
+                static uint64_t byte = 0;
+                audioOutputBuffer[audioOutputSampleIndex] = blob[byte];
+                byte = (byte + 1) % blobsize;
+            }
             if(audioOutputSampleIndex == audioOutputBufferSize - 1) {
                 enqueueAudioSamples(aodev, audioOutputBuffer, audioOutputBufferSize);
             }
