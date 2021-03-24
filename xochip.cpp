@@ -1416,6 +1416,7 @@ struct Interface
     Clock mostRecentSystemClock;
     Clock audioSampleStartClock;
     bool audioActive = false;
+    uint8_t currentAudioSample = 128 - 16;
 
     bool succeeded = false;
 
@@ -1709,15 +1710,13 @@ struct Interface
             // XXX debug printf("system clock = %llu, audio clock = %llu, sampleIndex = %d\n", systemClock.clocks, clock, audioOutputSampleIndex);
             uint8_t sample;
             if(audioActive) {
-                int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) % XOChipAudioSampleRate;
+                int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) %XOChipAudioSampleRate;
                 printf("audioInputSampleIndex = %d\n", audioInputSampleIndex);
                 int byteIndex = audioInputSampleIndex / 8;
                 int bitIndex = audioInputSampleIndex % 8;
-                sample = ((audioSample[byteIndex] << bitIndex) & 0x80) ? (127 - 16) : (127 + 16);
-            } else {
-                sample = 127;
+                currentAudioSample = ((audioSample[byteIndex] << bitIndex) & 0x80) ? (128 - 16) : (128 + 16);
             }
-            audioOutputBuffer[audioOutputSampleIndex] = sample;
+            audioOutputBuffer[audioOutputSampleIndex] = currentAudioSample;
             if(false) { /* XXX debugging */
                 static uint64_t byte = 0;
                 audioOutputBuffer[audioOutputSampleIndex] = blob[byte];
