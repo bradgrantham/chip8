@@ -1711,7 +1711,6 @@ struct Interface
             uint8_t sample;
             if(audioActive) {
                 int audioInputSampleIndex = ((clock - audioSampleStartClock.clocks) / audioInputSampleLengthInSystemClocks) %XOChipAudioSampleRate;
-                printf("audioInputSampleIndex = %d\n", audioInputSampleIndex);
                 int byteIndex = audioInputSampleIndex / 8;
                 int bitIndex = audioInputSampleIndex % 8;
                 currentAudioSample = ((audioSample[byteIndex] << bitIndex) & 0x80) ? (128 - 16) : (128 + 16);
