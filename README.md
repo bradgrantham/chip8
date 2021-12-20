@@ -34,6 +34,8 @@ Run all ROMs from bash (you'll have to interrupt the bash command-line):
 
 Alternatively, the script `RUN_ALL_ROMS` will run that command.
 
-Most ROMs don't work properly at the moment and a few may exit due to an assert but to my knowledge none crash.  I use [John Earnest's OctoJam page of ROMs that run in the browser](https://johnearnest.github.io/chip8Archive/) as my reference.
+Many ROMs work properly at the moment; a few may exit due to an assert.  I use [John Earnest's OctoJam page of ROMs that run in the browser](https://johnearnest.github.io/chip8Archive/) as my reference.
+
+This emulator supports features in [John Earnest's XO-Chip Specification](https://github.com/JohnEarnest/Octo/blob/gh-pages/docs/XO-ChipSpecification.md) through December 2020.  (I.e. the `pitch` and extended `saveflags` are not supported.)
 
 This has been tested on MacOS 10.14, MacOS 10.15, and Debian 10 Linux.
